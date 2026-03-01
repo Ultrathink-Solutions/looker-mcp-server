@@ -87,6 +87,24 @@ class LookerConfig(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
 
+    # ── K8s service-discovery env var collision guards ────────────────
+    # When deployed as a K8s Service named "looker", K8s auto-injects
+    # LOOKER_PORT=tcp://10.x.x.x:8080 and LOOKER_HOST=10.x.x.x which
+    # collide with the LOOKER_ env prefix.  Discard those values.
+    @field_validator("port", mode="before")
+    @classmethod
+    def _ignore_k8s_port(cls, v: object) -> object:
+        if isinstance(v, str) and v.startswith("tcp://"):
+            return 8080  # default
+        return v
+
+    @field_validator("host", mode="before")
+    @classmethod
+    def _ignore_k8s_host(cls, v: object) -> object:
+        if isinstance(v, str) and v.startswith("tcp://"):
+            return "0.0.0.0"  # default
+        return v
+
     # ── Server behaviour ─────────────────────────────────────────────
     timeout: float = 60.0
     """HTTP request timeout in seconds for Looker API calls."""

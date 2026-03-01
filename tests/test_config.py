@@ -56,6 +56,20 @@ class TestLookerConfig:
             config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
         assert config.is_http() is False
 
+    def test_k8s_port_env_collision(self):
+        """K8s injects LOOKER_PORT=tcp://10.x.x.x:8080 — should fall back to default."""
+        env = {"LOOKER_PORT": "tcp://10.0.0.1:8080"}
+        with patch.dict(os.environ, env, clear=True):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.port == 8080
+
+    def test_k8s_host_env_collision(self):
+        """K8s injects LOOKER_HOST=tcp://... — should fall back to default."""
+        env = {"LOOKER_HOST": "tcp://10.0.0.1:8080"}
+        with patch.dict(os.environ, env, clear=True):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.host == "0.0.0.0"
+
     def test_invalid_deployment_type(self):
         with patch.dict(os.environ, {"LOOKER_DEPLOYMENT_TYPE": "invalid"}, clear=True):
             with pytest.raises(ValueError):

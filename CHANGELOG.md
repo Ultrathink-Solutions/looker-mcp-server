@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-03-01
+
+### Fixed
+
+- Handle Kubernetes service-discovery env var collisions: when deployed as a
+  K8s Service named "looker", auto-injected `LOOKER_PORT=tcp://...` and
+  `LOOKER_HOST=tcp://...` values no longer crash config parsing.
+
 ## [0.1.0] - 2026-03-01
 
 ### Added
@@ -29,5 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ultrathink-solutions/looker-mcp-server/releases/tag/v0.1.0
