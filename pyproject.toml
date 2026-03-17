@@ -1,6 +1,6 @@
 [project]
 name = "looker-mcp-server"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Model Context Protocol (MCP) server for the Looker API with full tool coverage, OAuth pass-through, and user impersonation support."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

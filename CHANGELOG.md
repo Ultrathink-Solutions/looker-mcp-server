@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-03-17
+
+### Fixed
+
+- File operations (`list_project_files`, `get_file`, `create_file`, `update_file`,
+  `delete_file`) now pass `workspace_id=dev` query parameter, fixing 404 errors on
+  dev-mode endpoints.
+- Added `params` argument to `LookerSession.post()`, `.patch()`, `.put()`, and
+  `.delete()` methods (`.get()` already had it).
+
+### Removed
+
+- `toggle_dev_mode` tool — sessions are ephemeral (per tool call), so `PATCH /session`
+  had no lasting effect. File operations now handle workspace context automatically.
+
 ## [0.1.1] - 2026-03-01
 
 ### Fixed
@@ -37,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ultrathink-solutions/looker-mcp-server/releases/tag/v0.1.0
