@@ -51,7 +51,7 @@ jobs:
         run: uv run pyright
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
+    name: Test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

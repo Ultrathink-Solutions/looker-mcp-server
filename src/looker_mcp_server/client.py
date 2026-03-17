@@ -54,25 +54,32 @@ class LookerSession:
         self,
         path: str,
         body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> Any:
-        return await self._request("POST", path, json=body)
+        return await self._request("POST", path, params=params, json=body)
 
     async def patch(
         self,
         path: str,
         body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> Any:
-        return await self._request("PATCH", path, json=body)
+        return await self._request("PATCH", path, params=params, json=body)
 
     async def put(
         self,
         path: str,
         body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> Any:
-        return await self._request("PUT", path, json=body)
+        return await self._request("PUT", path, params=params, json=body)
 
-    async def delete(self, path: str) -> None:
-        await self._request("DELETE", path)
+    async def delete(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        await self._request("DELETE", path, params=params)
 
     async def _request(
         self,

@@ -1,8 +1,9 @@
 """Modeling tool group — LookML development.
 
-Tools for browsing and editing LookML files, toggling dev mode,
-and validating LookML syntax.  Does NOT include Git operations or
-deployment — those are in the ``git`` tool group.
+Tools for browsing and editing LookML files and validating LookML syntax.
+File operations automatically use dev-mode workspace context.
+Does NOT include Git operations or deployment — those are in the ``git``
+tool group.
 """
 
 from __future__ import annotations
@@ -13,6 +14,11 @@ from typing import Annotated
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+
+# Looker's file endpoints are dev-mode-only and require an explicit
+# workspace_id query parameter.  Sessions are ephemeral (per tool call),
+# so PATCH /session workspace state does not persist across calls.
+_DEV_PARAMS: dict[str, str] = {"workspace_id": "dev"}
 
 
 def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
@@ -36,14 +42,14 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("list_projects", e)
 
-    @server.tool(description="List all LookML files in a project.")
+    @server.tool(description="List all LookML files in a project (dev workspace).")
     async def list_project_files(
         project_id: Annotated[str, "LookML project ID"],
     ) -> str:
         ctx = client.build_context("list_project_files", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                files = await session.get(f"/projects/{project_id}/files")
+                files = await session.get(f"/projects/{project_id}/files", params=_DEV_PARAMS)
                 result = [
                     {
                         "id": f.get("id"),
@@ -59,7 +65,9 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
             return format_api_error("list_project_files", e)
 
     @server.tool(
-        description="Read the contents of a LookML file. Returns the full source code.",
+        description=(
+            "Read the contents of a LookML file (dev workspace). Returns the full source code."
+        ),
     )
     async def get_file(
         project_id: Annotated[str, "LookML project ID"],
@@ -70,16 +78,15 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("get_file", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                file_info = await session.get(f"/projects/{project_id}/files/{file_id}")
+                file_info = await session.get(
+                    f"/projects/{project_id}/files/{file_id}", params=_DEV_PARAMS
+                )
                 return json.dumps(file_info, indent=2)
         except Exception as e:
             return format_api_error("get_file", e)
 
     @server.tool(
-        description=(
-            "Create a new LookML file in a project. Requires dev mode to be "
-            "enabled first (use toggle_dev_mode)."
-        ),
+        description="Create a new LookML file in a project (dev workspace).",
     )
     async def create_file(
         project_id: Annotated[str, "LookML project ID"],
@@ -89,10 +96,10 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("create_file", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                # The Looker API uses the file_id in the path and content in the body.
                 file_info = await session.post(
                     f"/projects/{project_id}/files/{file_id}",
                     body={"id": file_id, "content": content},
+                    params=_DEV_PARAMS,
                 )
                 return json.dumps(
                     {"created": True, "id": file_info.get("id") if file_info else file_id},
@@ -102,9 +109,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
             return format_api_error("create_file", e)
 
     @server.tool(
-        description=(
-            "Update the content of an existing LookML file. Requires dev mode to be enabled first."
-        ),
+        description="Update the content of an existing LookML file (dev workspace).",
     )
     async def update_file(
         project_id: Annotated[str, "LookML project ID"],
@@ -117,6 +122,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                 file_info = await session.patch(
                     f"/projects/{project_id}/files/{file_id}",
                     body={"content": content},
+                    params=_DEV_PARAMS,
                 )
                 return json.dumps(
                     {"updated": True, "id": file_info.get("id") if file_info else file_id},
@@ -126,7 +132,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
             return format_api_error("update_file", e)
 
     @server.tool(
-        description="Delete a LookML file from a project. Requires dev mode.",
+        description="Delete a LookML file from a project (dev workspace).",
     )
     async def delete_file(
         project_id: Annotated[str, "LookML project ID"],
@@ -135,36 +141,10 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("delete_file", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/projects/{project_id}/files/{file_id}")
+                await session.delete(f"/projects/{project_id}/files/{file_id}", params=_DEV_PARAMS)
                 return json.dumps({"deleted": True, "file_id": file_id}, indent=2)
         except Exception as e:
             return format_api_error("delete_file", e)
-
-    @server.tool(
-        description=(
-            "Toggle the current session into or out of LookML dev mode. "
-            "Dev mode is required for creating, editing, or deleting LookML files. "
-            "Changes in dev mode are not visible to other users until deployed."
-        ),
-    )
-    async def toggle_dev_mode(
-        enable: Annotated[bool, "True to enter dev mode, False to exit"] = True,
-    ) -> str:
-        ctx = client.build_context("toggle_dev_mode", "modeling")
-        try:
-            async with client.session(ctx) as session:
-                result = await session.patch(
-                    "/session",
-                    body={"workspace_id": "dev" if enable else "production"},
-                )
-                workspace = (
-                    result.get("workspace_id") if result else ("dev" if enable else "production")
-                )
-                return json.dumps(
-                    {"dev_mode": workspace == "dev", "workspace": workspace}, indent=2
-                )
-        except Exception as e:
-            return format_api_error("toggle_dev_mode", e)
 
     @server.tool(
         description=(

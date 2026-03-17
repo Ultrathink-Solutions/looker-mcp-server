@@ -104,7 +104,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **schema**\* | `list_databases`, `list_schemas`, `list_tables`, `list_columns` | Inspect underlying database schema |
 | **content**\* | `list_looks`, `create_look`, `update_look`, `delete_look`, `list_dashboards`, `create_dashboard`, `update_dashboard`, `delete_dashboard`, `add_dashboard_element`, `add_dashboard_filter`, `generate_embed_url` | Manage Looks and dashboards |
 | **health**\* | `health_pulse`, `health_analyze`, `health_vacuum` | Instance health checks and usage analysis |
-| **modeling** | `list_projects`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `toggle_dev_mode`, `validate_project` | Edit LookML files and validate syntax |
+| **modeling** | `list_projects`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `validate_project` | Edit LookML files and validate syntax |
 | **git** | `get_git_branch`, `list_git_branches`, `create_git_branch`, `switch_git_branch`, `deploy_to_production`, `reset_to_production` | Git operations and production deployment |
 | **admin** | `list_users`, `get_user`, `create_user`, `update_user`, `delete_user`, `list_roles`, `create_role`, `list_groups`, `add_group_user`, `remove_group_user`, `list_schedules`, `create_schedule`, `delete_schedule` | User, role, group, and schedule management |
 

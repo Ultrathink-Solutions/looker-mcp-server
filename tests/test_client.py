@@ -72,6 +72,82 @@ class TestLookerSession:
             result = await session.delete("/resource/1")
             assert result is None
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_with_params(self):
+        api_url = "https://test.looker.com/api/4.0"
+        route = respx.get(f"{api_url}/projects/myproj/files").mock(
+            return_value=httpx.Response(200, json=[{"id": "test.lkml"}])
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            result = await session.get("/projects/myproj/files", params={"workspace_id": "dev"})
+            assert result == [{"id": "test.lkml"}]
+            assert "workspace_id=dev" in str(route.calls[0].request.url)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_post_with_params(self):
+        api_url = "https://test.looker.com/api/4.0"
+        route = respx.post(f"{api_url}/projects/myproj/files/new.lkml").mock(
+            return_value=httpx.Response(200, json={"id": "new.lkml"})
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            result = await session.post(
+                "/projects/myproj/files/new.lkml",
+                body={"content": "view: test {}"},
+                params={"workspace_id": "dev"},
+            )
+            assert result["id"] == "new.lkml"
+            assert "workspace_id=dev" in str(route.calls[0].request.url)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_patch_with_params(self):
+        api_url = "https://test.looker.com/api/4.0"
+        route = respx.patch(f"{api_url}/projects/myproj/files/test.lkml").mock(
+            return_value=httpx.Response(200, json={"id": "test.lkml"})
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            result = await session.patch(
+                "/projects/myproj/files/test.lkml",
+                body={"content": "updated"},
+                params={"workspace_id": "dev"},
+            )
+            assert result["id"] == "test.lkml"
+            assert "workspace_id=dev" in str(route.calls[0].request.url)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_put_with_params(self):
+        api_url = "https://test.looker.com/api/4.0"
+        route = respx.put(f"{api_url}/projects/myproj/files/test.lkml").mock(
+            return_value=httpx.Response(200, json={"id": "test.lkml"})
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            result = await session.put(
+                "/projects/myproj/files/test.lkml",
+                body={"content": "updated"},
+                params={"workspace_id": "dev"},
+            )
+            assert result["id"] == "test.lkml"
+            assert "workspace_id=dev" in str(route.calls[0].request.url)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_delete_with_params(self):
+        api_url = "https://test.looker.com/api/4.0"
+        route = respx.delete(f"{api_url}/projects/myproj/files/old.lkml").mock(
+            return_value=httpx.Response(204)
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            await session.delete("/projects/myproj/files/old.lkml", params={"workspace_id": "dev"})
+            assert "workspace_id=dev" in str(route.calls[0].request.url)
+
 
 class TestLookerClientApiKey:
     @pytest.mark.asyncio
