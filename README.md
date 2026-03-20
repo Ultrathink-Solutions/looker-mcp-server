@@ -10,7 +10,7 @@ A full-featured [Model Context Protocol](https://modelcontextprotocol.io) (MCP) 
 
 ## Features
 
-- **56 tools** across 8 groups covering the full Looker API surface
+- **78 tools** across 10 groups covering the full Looker API surface
 - **Semantic layer queries** — query through LookML models, not raw SQL
 - **OAuth pass-through** — forward user tokens from an upstream gateway or MCP OAuth flow
 - **User impersonation** — admin sudo on self-hosted Looker, OAuth on Google Cloud core
@@ -103,6 +103,8 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **query**\* | `query`, `query_sql`, `run_look`, `run_dashboard`, `query_url`, `search_content` | Run queries through the semantic layer |
 | **schema**\* | `list_databases`, `list_schemas`, `list_tables`, `list_columns` | Inspect underlying database schema |
 | **content**\* | `list_looks`, `create_look`, `update_look`, `delete_look`, `list_dashboards`, `create_dashboard`, `update_dashboard`, `delete_dashboard`, `add_dashboard_element`, `add_dashboard_filter`, `generate_embed_url` | Manage Looks and dashboards |
+| **board** | `list_boards`, `get_board`, `create_board`, `update_board`, `delete_board`, `get_board_section`, `create_board_section`, `update_board_section`, `delete_board_section`, `get_board_item`, `create_board_item`, `update_board_item`, `delete_board_item` | Curate content with boards, sections, and items |
+| **folder** | `list_folders`, `get_folder`, `create_folder`, `update_folder`, `delete_folder`, `get_folder_children`, `get_folder_ancestors`, `get_folder_looks`, `get_folder_dashboards` | Navigate and manage the folder hierarchy |
 | **health**\* | `health_pulse`, `health_analyze`, `health_vacuum` | Instance health checks and usage analysis |
 | **modeling** | `list_projects`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `validate_project` | Edit LookML files and validate syntax |
 | **git** | `get_git_branch`, `list_git_branches`, `create_git_branch`, `switch_git_branch`, `deploy_to_production`, `reset_to_production` | Git operations and production deployment |
@@ -117,7 +119,7 @@ looker-mcp-server
 # Specific groups
 looker-mcp-server --groups explore,query
 
-# All groups (including modeling, git, admin)
+# All groups (including board, folder, modeling, git, admin)
 looker-mcp-server --groups all
 ```
 

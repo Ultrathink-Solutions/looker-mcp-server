@@ -15,6 +15,8 @@ ALL_GROUPS = frozenset(
         "query",
         "schema",
         "content",
+        "board",
+        "folder",
         "modeling",
         "git",
         "admin",

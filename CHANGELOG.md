@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-19
+
+### Added
+
+- **board** tool group (13 tools): full CRUD for boards, board sections, and board items
+  - `list_boards`, `get_board`, `create_board`, `update_board`, `delete_board`
+  - `get_board_section`, `create_board_section`, `update_board_section`, `delete_board_section`
+  - `get_board_item`, `create_board_item`, `update_board_item`, `delete_board_item`
+  - Input validation on `create_board_item` enforcing exactly one of `dashboard_id`, `look_id`, or `url`
+- **folder** tool group (9 tools): folder navigation, CRUD, and content listing
+  - `list_folders`, `get_folder`, `create_folder`, `update_folder`, `delete_folder`
+  - `get_folder_children`, `get_folder_ancestors`
+  - `get_folder_looks`, `get_folder_dashboards`
+- Total tool count: 56 → 78 across 10 groups
+
 ## [0.1.2] - 2026-03-17
 
 ### Fixed
@@ -52,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ultrathink-solutions/looker-mcp-server/releases/tag/v0.1.0
