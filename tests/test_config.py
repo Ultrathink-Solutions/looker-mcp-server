@@ -86,7 +86,18 @@ class TestGroupConstants:
         assert DEFAULT_GROUPS.issubset(ALL_GROUPS)
 
     def test_all_groups_includes_expected(self):
-        expected = {"explore", "query", "schema", "content", "modeling", "git", "admin", "health"}
+        expected = {
+            "explore",
+            "query",
+            "schema",
+            "content",
+            "board",
+            "folder",
+            "modeling",
+            "git",
+            "admin",
+            "health",
+        }
         assert ALL_GROUPS == expected
 
     def test_admin_and_git_not_in_defaults(self):

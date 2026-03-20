@@ -78,8 +78,10 @@ def create_server(
     groups = enabled_groups or DEFAULT_GROUPS
 
     from .tools.admin import register_admin_tools
+    from .tools.board import register_board_tools
     from .tools.content import register_content_tools
     from .tools.explore import register_explore_tools
+    from .tools.folder import register_folder_tools
     from .tools.git import register_git_tools
     from .tools.health import register_health_tools
     from .tools.modeling import register_modeling_tools
@@ -91,6 +93,8 @@ def create_server(
         "query": register_query_tools,
         "schema": register_schema_tools,
         "content": register_content_tools,
+        "board": register_board_tools,
+        "folder": register_folder_tools,
         "modeling": register_modeling_tools,
         "git": register_git_tools,
         "admin": register_admin_tools,
