@@ -213,9 +213,9 @@ class TestBoardItems:
 class TestBoardToolRegistration:
     """Verify that board tools are registered when the group is enabled."""
 
-    def test_board_tools_registered(self, server_and_client):
+    async def test_board_tools_registered(self, server_and_client):
         mcp, _client = server_and_client
-        tool_names = {t.name for t in mcp._tool_manager._tools.values()}
+        tool_names = {t.name for t in await mcp.list_tools()}
         expected = {
             "list_boards",
             "get_board",

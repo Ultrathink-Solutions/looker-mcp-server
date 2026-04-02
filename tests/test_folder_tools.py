@@ -233,9 +233,9 @@ class TestFolderContent:
 class TestFolderToolRegistration:
     """Verify that folder tools are registered when the group is enabled."""
 
-    def test_folder_tools_registered(self, server_and_client):
+    async def test_folder_tools_registered(self, server_and_client):
         mcp, _client = server_and_client
-        tool_names = {t.name for t in mcp._tool_manager._tools.values()}
+        tool_names = {t.name for t in await mcp.list_tools()}
         expected = {
             "list_folders",
             "get_folder",
