@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - Unreleased
+
+### Added
+
+- **RBAC management tools** (20 new tools in admin group):
+  - Permission sets: `list_permissions`, `list_permission_sets`, `create_permission_set`, `update_permission_set`, `delete_permission_set`
+  - Model sets: `list_model_sets`, `create_model_set`, `update_model_set`, `delete_model_set`
+  - Role lifecycle: `get_role`, `update_role`, `delete_role`
+  - Group management: `create_group`, `delete_group`
+  - Role assignments: `set_role_groups`, `set_role_users`, `set_user_roles`, `get_user_roles`
+  - User provisioning: `create_credentials_email`, `send_password_reset`
+- Total tool count: 78 → 98 across 10 groups
+
+### Changed
+
+- `LookerSession.put()` body parameter now accepts `list[Any]` in addition to `dict[str, Any]` (needed for Looker's array-body PUT endpoints)
+
+## [0.3.0] - Unreleased
+
+### Fixed
+
+- Upgraded fastmcp 2.x → 3.2.0 for CVE-2026-32871 (SSRF in OpenAPI Provider)
 
 ## [0.2.0] - 2026-03-19
 
@@ -67,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.2.0...HEAD
+[0.4.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.1.0...v0.1.1
