@@ -119,6 +119,53 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("delete_user", e)
 
+    @server.tool(
+        description="Attach email/password credentials to a user so they can log in.",
+    )
+    async def create_credentials_email(
+        user_id: Annotated[str, "User ID"],
+        email: Annotated[str, "Email address for login"],
+    ) -> str:
+        ctx = client.build_context("create_credentials_email", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                creds = await session.post(
+                    f"/users/{user_id}/credentials_email",
+                    body={"email": email},
+                )
+                return json.dumps(
+                    {
+                        "user_id": user_id,
+                        "email": creds.get("email"),
+                        "created": True,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("create_credentials_email", e)
+
+    @server.tool(
+        description=(
+            "Send a password reset or account setup email to a user. "
+            "The user must already have email/password credentials attached."
+        ),
+    )
+    async def send_password_reset(
+        user_id: Annotated[str, "User ID"],
+    ) -> str:
+        ctx = client.build_context("send_password_reset", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                await session.post(
+                    f"/users/{user_id}/credentials_email/send_password_reset",
+                )
+                return json.dumps(
+                    {"user_id": user_id, "password_reset_sent": True},
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("send_password_reset", e)
+
     # ── Roles ────────────────────────────────────────────────────────
 
     @server.tool(description="List all roles defined in Looker.")
@@ -159,6 +206,274 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 return json.dumps({"id": role.get("id"), "name": role.get("name")}, indent=2)
         except Exception as e:
             return format_api_error("create_role", e)
+
+    @server.tool(description="Get detailed information about a specific role.")
+    async def get_role(
+        role_id: Annotated[str, "Role ID"],
+    ) -> str:
+        ctx = client.build_context("get_role", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                role = await session.get(f"/roles/{role_id}")
+                return json.dumps(role, indent=2)
+        except Exception as e:
+            return format_api_error("get_role", e)
+
+    @server.tool(
+        description="Update an existing role's name, permission set, or model set.",
+    )
+    async def update_role(
+        role_id: Annotated[str, "Role ID to update"],
+        name: Annotated[str | None, "New role name"] = None,
+        permission_set_id: Annotated[int | None, "New permission set ID"] = None,
+        model_set_id: Annotated[int | None, "New model set ID"] = None,
+    ) -> str:
+        ctx = client.build_context("update_role", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {}
+                if name is not None:
+                    body["name"] = name
+                if permission_set_id is not None:
+                    body["permission_set_id"] = permission_set_id
+                if model_set_id is not None:
+                    body["model_set_id"] = model_set_id
+                role = await session.patch(f"/roles/{role_id}", body=body)
+                return json.dumps(
+                    {
+                        "id": role.get("id"),
+                        "name": role.get("name"),
+                        "updated": True,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_role", e)
+
+    @server.tool(description="Delete a role. This action cannot be undone.")
+    async def delete_role(
+        role_id: Annotated[str, "Role ID to delete"],
+    ) -> str:
+        ctx = client.build_context("delete_role", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(f"/roles/{role_id}")
+                return json.dumps({"deleted": True, "role_id": role_id}, indent=2)
+        except Exception as e:
+            return format_api_error("delete_role", e)
+
+    # ── Permission Sets ─────────────────────────────────────────────
+
+    @server.tool(
+        description=("List all valid permission strings that can be assigned to permission sets."),
+    )
+    async def list_permissions() -> str:
+        ctx = client.build_context("list_permissions", "admin")
+        try:
+            async with client.session(ctx) as session:
+                permissions = await session.get("/permissions")
+                result = [
+                    {
+                        "permission": p.get("permission"),
+                        "description": p.get("description"),
+                    }
+                    for p in (permissions or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_permissions", e)
+
+    @server.tool(description="List all permission sets defined in Looker.")
+    async def list_permission_sets() -> str:
+        ctx = client.build_context("list_permission_sets", "admin")
+        try:
+            async with client.session(ctx) as session:
+                psets = await session.get("/permission_sets")
+                result = [
+                    {
+                        "id": ps.get("id"),
+                        "name": ps.get("name"),
+                        "permissions": ps.get("permissions"),
+                        "built_in": ps.get("built_in"),
+                        "all_access": ps.get("all_access"),
+                    }
+                    for ps in (psets or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_permission_sets", e)
+
+    @server.tool(
+        description="Create a custom permission set with specified permissions.",
+    )
+    async def create_permission_set(
+        name: Annotated[str, "Permission set name"],
+        permissions: Annotated[
+            list[str],
+            "List of permission strings (use list_permissions to see valid values)",
+        ],
+    ) -> str:
+        ctx = client.build_context("create_permission_set", "admin")
+        try:
+            async with client.session(ctx) as session:
+                body = {"name": name, "permissions": permissions}
+                pset = await session.post("/permission_sets", body=body)
+                return json.dumps(
+                    {
+                        "id": pset.get("id"),
+                        "name": pset.get("name"),
+                        "permissions": pset.get("permissions"),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("create_permission_set", e)
+
+    @server.tool(
+        description="Update an existing permission set's name or permissions.",
+    )
+    async def update_permission_set(
+        permission_set_id: Annotated[str, "Permission set ID to update"],
+        name: Annotated[str | None, "New name"] = None,
+        permissions: Annotated[list[str] | None, "New list of permission strings"] = None,
+    ) -> str:
+        ctx = client.build_context(
+            "update_permission_set",
+            "admin",
+            {"permission_set_id": permission_set_id},
+        )
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {}
+                if name is not None:
+                    body["name"] = name
+                if permissions is not None:
+                    body["permissions"] = permissions
+                pset = await session.patch(f"/permission_sets/{permission_set_id}", body=body)
+                return json.dumps(
+                    {
+                        "id": pset.get("id"),
+                        "name": pset.get("name"),
+                        "updated": True,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_permission_set", e)
+
+    @server.tool(
+        description="Delete a permission set. This action cannot be undone.",
+    )
+    async def delete_permission_set(
+        permission_set_id: Annotated[str, "Permission set ID to delete"],
+    ) -> str:
+        ctx = client.build_context(
+            "delete_permission_set",
+            "admin",
+            {"permission_set_id": permission_set_id},
+        )
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(f"/permission_sets/{permission_set_id}")
+                return json.dumps(
+                    {
+                        "deleted": True,
+                        "permission_set_id": permission_set_id,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("delete_permission_set", e)
+
+    # ── Model Sets ──────────────────────────────────────────────────
+
+    @server.tool(description="List all model sets defined in Looker.")
+    async def list_model_sets() -> str:
+        ctx = client.build_context("list_model_sets", "admin")
+        try:
+            async with client.session(ctx) as session:
+                msets = await session.get("/model_sets")
+                result = [
+                    {
+                        "id": ms.get("id"),
+                        "name": ms.get("name"),
+                        "models": ms.get("models"),
+                        "built_in": ms.get("built_in"),
+                        "all_access": ms.get("all_access"),
+                    }
+                    for ms in (msets or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_model_sets", e)
+
+    @server.tool(
+        description="Create a custom model set with specified LookML models.",
+    )
+    async def create_model_set(
+        name: Annotated[str, "Model set name"],
+        models: Annotated[list[str], "List of LookML model names to include"],
+    ) -> str:
+        ctx = client.build_context("create_model_set", "admin")
+        try:
+            async with client.session(ctx) as session:
+                body = {"name": name, "models": models}
+                mset = await session.post("/model_sets", body=body)
+                return json.dumps(
+                    {
+                        "id": mset.get("id"),
+                        "name": mset.get("name"),
+                        "models": mset.get("models"),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("create_model_set", e)
+
+    @server.tool(
+        description="Update an existing model set's name or models.",
+    )
+    async def update_model_set(
+        model_set_id: Annotated[str, "Model set ID to update"],
+        name: Annotated[str | None, "New name"] = None,
+        models: Annotated[list[str] | None, "New list of LookML model names"] = None,
+    ) -> str:
+        ctx = client.build_context("update_model_set", "admin", {"model_set_id": model_set_id})
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {}
+                if name is not None:
+                    body["name"] = name
+                if models is not None:
+                    body["models"] = models
+                mset = await session.patch(f"/model_sets/{model_set_id}", body=body)
+                return json.dumps(
+                    {
+                        "id": mset.get("id"),
+                        "name": mset.get("name"),
+                        "updated": True,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_model_set", e)
+
+    @server.tool(
+        description="Delete a model set. This action cannot be undone.",
+    )
+    async def delete_model_set(
+        model_set_id: Annotated[str, "Model set ID to delete"],
+    ) -> str:
+        ctx = client.build_context("delete_model_set", "admin", {"model_set_id": model_set_id})
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(f"/model_sets/{model_set_id}")
+                return json.dumps(
+                    {"deleted": True, "model_set_id": model_set_id},
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("delete_model_set", e)
 
     # ── Groups ───────────────────────────────────────────────────────
 
@@ -212,6 +527,113 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("remove_group_user", e)
+
+    @server.tool(description="Create a new user group.")
+    async def create_group(
+        name: Annotated[str, "Group name"],
+    ) -> str:
+        ctx = client.build_context("create_group", "admin")
+        try:
+            async with client.session(ctx) as session:
+                group = await session.post("/groups", body={"name": name})
+                return json.dumps(
+                    {"id": group.get("id"), "name": group.get("name")},
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("create_group", e)
+
+    @server.tool(description="Delete a group. This action cannot be undone.")
+    async def delete_group(
+        group_id: Annotated[str, "Group ID to delete"],
+    ) -> str:
+        ctx = client.build_context("delete_group", "admin", {"group_id": group_id})
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(f"/groups/{group_id}")
+                return json.dumps({"deleted": True, "group_id": group_id}, indent=2)
+        except Exception as e:
+            return format_api_error("delete_group", e)
+
+    # ── Role Assignments ────────────────────────────────────────────
+
+    @server.tool(
+        description=(
+            "Set the groups assigned to a role. "
+            "This replaces all current group assignments for the role."
+        ),
+    )
+    async def set_role_groups(
+        role_id: Annotated[str, "Role ID"],
+        group_ids: Annotated[list[int], "List of group IDs to assign to this role"],
+    ) -> str:
+        ctx = client.build_context("set_role_groups", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                groups = await session.put(f"/roles/{role_id}/groups", body=group_ids)
+                result = [{"id": g.get("id"), "name": g.get("name")} for g in (groups or [])]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("set_role_groups", e)
+
+    @server.tool(
+        description=(
+            "Set the users assigned to a role. "
+            "This replaces all current user assignments for the role."
+        ),
+    )
+    async def set_role_users(
+        role_id: Annotated[str, "Role ID"],
+        user_ids: Annotated[list[int], "List of user IDs to assign to this role"],
+    ) -> str:
+        ctx = client.build_context("set_role_users", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                users = await session.put(f"/roles/{role_id}/users", body=user_ids)
+                result = [{"id": u.get("id"), "email": u.get("email")} for u in (users or [])]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("set_role_users", e)
+
+    @server.tool(
+        description=(
+            "Set the roles assigned to a user. "
+            "This replaces all current role assignments for the user."
+        ),
+    )
+    async def set_user_roles(
+        user_id: Annotated[str, "User ID"],
+        role_ids: Annotated[list[int], "List of role IDs to assign to this user"],
+    ) -> str:
+        ctx = client.build_context("set_user_roles", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                roles = await session.put(f"/users/{user_id}/roles", body=role_ids)
+                result = [{"id": r.get("id"), "name": r.get("name")} for r in (roles or [])]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("set_user_roles", e)
+
+    @server.tool(description="Get all roles assigned to a specific user.")
+    async def get_user_roles(
+        user_id: Annotated[str, "User ID"],
+    ) -> str:
+        ctx = client.build_context("get_user_roles", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                roles = await session.get(f"/users/{user_id}/roles")
+                result = [
+                    {
+                        "id": r.get("id"),
+                        "name": r.get("name"),
+                        "permission_set_id": r.get("permission_set_id"),
+                        "model_set_id": r.get("model_set_id"),
+                    }
+                    for r in (roles or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("get_user_roles", e)
 
     # ── Scheduled plans ──────────────────────────────────────────────
 

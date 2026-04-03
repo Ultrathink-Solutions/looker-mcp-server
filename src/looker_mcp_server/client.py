@@ -69,7 +69,7 @@ class LookerSession:
     async def put(
         self,
         path: str,
-        body: dict[str, Any] | None = None,
+        body: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
         return await self._request("PUT", path, params=params, json=body)
@@ -86,7 +86,7 @@ class LookerSession:
         method: str,
         path: str,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        json: dict[str, Any] | list[Any] | None = None,
     ) -> Any:
         response = await self._http.request(
             method,
