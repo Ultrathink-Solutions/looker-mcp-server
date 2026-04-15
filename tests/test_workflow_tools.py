@@ -1097,7 +1097,6 @@ class TestDisableStaleSessions:
             await client.close()
 
 
-
 # ══ Registration ═════════════════════════════════════════════════════
 
 
