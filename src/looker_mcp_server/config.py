@@ -21,6 +21,7 @@ ALL_GROUPS = frozenset(
         "git",
         "admin",
         "connection",
+        "user_attributes",
         "health",
     }
 )

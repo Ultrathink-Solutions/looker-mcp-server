@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-15
+
+### Added
+
+- **user_attributes** tool group (11 tools): manage per-user and per-group data entitlements used for row-level security, per-developer git credentials, and LookML filter defaults.
+  - Attribute lifecycle: `list_user_attributes`, `get_user_attribute`, `create_user_attribute`, `update_user_attribute`, `delete_user_attribute`
+  - Per-group overrides: `list_user_attribute_group_values`, `set_user_attribute_group_values`, `delete_user_attribute_group_value`
+  - Per-user overrides: `list_user_attribute_values_for_user`, `set_user_attribute_user_value`, `delete_user_attribute_user_value`
+  - `list_user_attribute_values_for_user` surfaces each value's ``source`` (user override / group / default), useful for explaining why a user sees specific LookML behavior.
+- Total tool count: 111 → 115 across 12 groups
+
+### Changed
+
+- `LookerSession.post()` and `.patch()` body parameter now accept `list[Any]` in addition to `dict[str, Any]` (needed for `POST /user_attributes/{id}/group_values`, which takes an array body). Matches the `put()` widening from 0.4.0.
+- `_path_seg` helper added to `tools/_helpers.py` for consistent URL-encoding of path segments; `connection.py`, `modeling.py`, and `user_attributes.py` now share the single implementation.
+
 ## [0.6.0] - 2026-04-15
 
 ### Added
@@ -116,6 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.7.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.3.0...v0.4.0

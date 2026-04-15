@@ -10,7 +10,7 @@ A full-featured [Model Context Protocol](https://modelcontextprotocol.io) (MCP) 
 
 ## Features
 
-- **111 tools** across 11 groups covering the full Looker API surface
+- **115 tools** across 12 groups covering the full Looker API surface
 - **Semantic layer queries** — query through LookML models, not raw SQL
 - **OAuth pass-through** — forward user tokens from an upstream gateway or MCP OAuth flow
 - **User impersonation** — admin sudo on self-hosted Looker, OAuth on Google Cloud core
@@ -110,6 +110,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **git** | `get_git_branch`, `list_git_branches`, `create_git_branch`, `switch_git_branch`, `deploy_to_production`, `reset_to_production` | Git operations and production deployment |
 | **admin** | `list_users`, `get_user`, `create_user`, `update_user`, `delete_user`, `create_credentials_email`, `send_password_reset`, `list_roles`, `get_role`, `create_role`, `update_role`, `delete_role`, `list_permissions`, `list_permission_sets`, `create_permission_set`, `update_permission_set`, `delete_permission_set`, `list_model_sets`, `create_model_set`, `update_model_set`, `delete_model_set`, `list_groups`, `create_group`, `delete_group`, `add_group_user`, `remove_group_user`, `set_role_groups`, `set_role_users`, `set_user_roles`, `get_user_roles`, `list_schedules`, `create_schedule`, `delete_schedule` | User, role, RBAC, group, and schedule management |
 | **connection** | `get_connection`, `list_connection_dialects`, `create_connection`, `update_connection`, `delete_connection`, `test_connection` | Database connection CRUD and health checks |
+| **user_attributes** | `list_user_attributes`, `get_user_attribute`, `create_user_attribute`, `update_user_attribute`, `delete_user_attribute`, `list_user_attribute_group_values`, `set_user_attribute_group_values`, `delete_user_attribute_group_value`, `list_user_attribute_values_for_user`, `set_user_attribute_user_value`, `delete_user_attribute_user_value` | User attribute definitions plus per-group and per-user value overrides (row-level security, per-developer credentials, filter defaults) |
 
 ### Selecting Groups
 
@@ -120,7 +121,7 @@ looker-mcp-server
 # Specific groups
 looker-mcp-server --groups explore,query
 
-# All groups (including board, folder, modeling, git, admin, connection)
+# All groups (including board, folder, modeling, git, admin, connection, user_attributes)
 looker-mcp-server --groups all
 ```
 

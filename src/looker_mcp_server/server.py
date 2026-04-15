@@ -88,6 +88,7 @@ def create_server(
     from .tools.modeling import register_modeling_tools
     from .tools.query import register_query_tools
     from .tools.schema import register_schema_tools
+    from .tools.user_attributes import register_user_attribute_tools
 
     _group_registry: dict[str, Any] = {
         "explore": register_explore_tools,
@@ -100,6 +101,7 @@ def create_server(
         "git": register_git_tools,
         "admin": register_admin_tools,
         "connection": register_connection_tools,
+        "user_attributes": register_user_attribute_tools,
         "health": register_health_tools,
     }
 
