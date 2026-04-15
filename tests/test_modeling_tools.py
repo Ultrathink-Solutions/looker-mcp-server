@@ -10,10 +10,12 @@ import json
 import httpx
 import pytest
 import respx
+from fastmcp import Client
 
 from looker_mcp_server.client import LookerClient
 from looker_mcp_server.config import LookerConfig
 from looker_mcp_server.identity import ApiKeyIdentityProvider
+from looker_mcp_server.server import create_server
 
 
 @pytest.fixture
@@ -127,6 +129,39 @@ class TestUpdateProject:
                 assert "pull_request_mode" not in captured["body"]
         finally:
             await client.close()
+
+
+class TestUpdateProjectNoFields:
+    """The empty-body branch of update_project must short-circuit before calling Looker."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_error_when_no_fields_provided(self, config):
+        _mock_login_logout()
+        # No PATCH mock is registered — any outbound PATCH would raise.
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "update_project",
+                    {"project_id": "analytics"},
+                )
+                from mcp.types import TextContent
+
+                content = result.content[0]
+                # Tool returns a plain JSON string, which fastmcp wraps in TextContent.
+                assert isinstance(content, TextContent), (
+                    f"Unexpected content type: {type(content)}"
+                )
+                payload = json.loads(content.text)
+                assert payload["error"] == "No fields provided to update."
+                assert "hint" in payload
+                # No HTTP PATCH call was issued (respx recorded none).
+                patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
+                assert patch_calls == []
+        finally:
+            await looker_client.close()
 
 
 class TestDeleteProject:

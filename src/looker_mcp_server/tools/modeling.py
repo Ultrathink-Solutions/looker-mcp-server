@@ -15,6 +15,7 @@ from urllib.parse import quote
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+from ._helpers import _set_if
 
 # Looker's file endpoints are dev-mode-only and require an explicit
 # workspace_id query parameter.  Sessions are ephemeral (per tool call),
@@ -50,7 +51,9 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("list_project_files", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                files = await session.get(f"/projects/{project_id}/files", params=_DEV_PARAMS)
+                files = await session.get(
+                    f"/projects/{quote(project_id, safe='')}/files", params=_DEV_PARAMS
+                )
                 result = [
                     {
                         "id": f.get("id"),
@@ -80,7 +83,8 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 file_info = await session.get(
-                    f"/projects/{project_id}/files/{file_id}", params=_DEV_PARAMS
+                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
+                    params=_DEV_PARAMS,
                 )
                 return json.dumps(file_info, indent=2)
         except Exception as e:
@@ -98,7 +102,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 file_info = await session.post(
-                    f"/projects/{project_id}/files/{file_id}",
+                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
                     body={"id": file_id, "content": content},
                     params=_DEV_PARAMS,
                 )
@@ -121,7 +125,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 file_info = await session.patch(
-                    f"/projects/{project_id}/files/{file_id}",
+                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
                     body={"content": content},
                     params=_DEV_PARAMS,
                 )
@@ -142,7 +146,10 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("delete_file", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/projects/{project_id}/files/{file_id}", params=_DEV_PARAMS)
+                await session.delete(
+                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
+                    params=_DEV_PARAMS,
+                )
                 return json.dumps({"deleted": True, "file_id": file_id}, indent=2)
         except Exception as e:
             return format_api_error("delete_file", e)
@@ -382,7 +389,9 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("validate_project", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                result = await session.post(f"/projects/{project_id}/lookml_validation")
+                result = await session.post(
+                    f"/projects/{quote(project_id, safe='')}/lookml_validation"
+                )
                 errors = result.get("errors") or [] if result else []
                 warnings = result.get("warnings") or [] if result else []
                 return json.dumps(
@@ -413,13 +422,3 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("validate_project", e)
-
-
-def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
-    """Add ``key`` to ``body`` only when ``value`` is not ``None``.
-
-    Keeps tool signatures flat (optional ``| None`` args) without forwarding
-    explicit ``None`` values that Looker would interpret as "clear this field".
-    """
-    if value is not None:
-        body[key] = value
