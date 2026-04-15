@@ -233,6 +233,91 @@ class TestDeployLookmlChanges:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_fails_on_non_404_patch_error(self, config):
+        """Non-404 PATCH failures (auth, 5xx, etc.) must propagate — we
+        must NOT silently fall back to POST, which would double side
+        effects and mask the real cause."""
+        _mock_login_logout()
+
+        # PATCH returns 500 — simulating a server error / transient.
+        respx.patch(url__regex=rf"{API_URL}/projects/analytics/files/.*").mock(
+            return_value=httpx.Response(500, json={"message": "internal server error"})
+        )
+        # No POST or deploy mocks — if either is called, the test errors.
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "deploy_lookml_changes",
+                {
+                    "project_id": "analytics",
+                    "files": {"views/orders.view.lkml": "view: orders {}"},
+                    "validate": True,
+                },
+            )()
+            # Error surfaces to caller — tool's top-level exception
+            # handler returns the format_api_error envelope.
+            assert "error" in payload
+            # Safety invariants: no create-as-fallback, no validation,
+            # no deploy. The tool fails fast on the first bad PATCH.
+            post_calls = [
+                c
+                for c in respx.calls
+                if c.request.method == "POST" and "/files/" in c.request.url.path
+            ]
+            assert post_calls == []
+            deploy_calls = [
+                c for c in respx.calls if c.request.url.path.endswith("/deploy_to_production")
+            ]
+            assert deploy_calls == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_creates_missing_file_on_404(self, config):
+        """The 404→POST fallback path still works for genuinely missing
+        files. Complements test_fails_on_non_404_patch_error."""
+        _mock_login_logout()
+
+        respx.patch(url__regex=rf"{API_URL}/projects/analytics/files/.*").mock(
+            return_value=httpx.Response(404, json={"message": "file not found"})
+        )
+        create_captured: dict = {"called": False}
+
+        def capture_post(request: httpx.Request) -> httpx.Response:
+            create_captured["called"] = True
+            return httpx.Response(200, json={"id": "views/new.view.lkml"})
+
+        respx.post(url__regex=rf"{API_URL}/projects/analytics/files/.*").mock(
+            side_effect=capture_post
+        )
+        respx.post(f"{API_URL}/projects/analytics/lookml_validation").mock(
+            return_value=httpx.Response(200, json={"errors": [], "warnings": []})
+        )
+        respx.post(f"{API_URL}/projects/analytics/deploy_to_production").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "deploy_lookml_changes",
+                {
+                    "project_id": "analytics",
+                    "files": {"views/new.view.lkml": "view: new {}"},
+                },
+            )()
+            assert payload["deployed"] is True
+            assert payload["files"][0]["action"] == "created"
+            assert create_captured["called"] is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_deploys_when_validation_passes(self, config):
         _mock_login_logout()
         respx.patch(url__regex=rf"{API_URL}/projects/analytics/files/.*").mock(
@@ -406,6 +491,44 @@ class TestProvisionUser:
             assert creds_step["ok"] is False
             # User was NOT rolled back — they exist and have an id.
             assert payload["user_id"] == "99"
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_short_circuits_on_empty_user_id(self, config):
+        """If POST /users returns no id, downstream calls would get a
+        malformed URL like /users//credentials_email. Tool must detect
+        this and short-circuit with a clear error."""
+        _mock_login_logout()
+        # POST /users succeeds but returns no id field.
+        respx.post(f"{API_URL}/users").mock(
+            return_value=httpx.Response(201, json={"email": "a@example.com"})
+        )
+        # No mocks for downstream endpoints — if any are called, the test errors.
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "provision_user",
+                {
+                    "email": "a@example.com",
+                    "first_name": "Alice",
+                    "last_name": "Example",
+                    "user_attribute_values": {"5": "EMEA"},
+                    "send_invite": True,
+                },
+            )()
+            assert "error" in payload
+            assert "no id" in payload["error"].lower()
+            # No downstream POSTs happened — tool failed fast.
+            post_calls = [c for c in respx.calls if c.request.method == "POST"]
+            # Exactly two: /login (session setup), and POST /users.
+            post_paths = {c.request.url.path for c in post_calls}
+            assert all(p.endswith("/login") or p.endswith("/users") for p in post_paths), (
+                f"Unexpected POST calls: {post_paths}"
+            )
         finally:
             await client.close()
 

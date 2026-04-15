@@ -124,7 +124,7 @@ looker-mcp-server
 # Specific groups
 looker-mcp-server --groups explore,query
 
-# All groups (including board, folder, modeling, git, admin, connection, user_attributes, credentials, audit)
+# All groups (including board, folder, modeling, git, admin, connection, user_attributes, credentials, audit, workflows)
 looker-mcp-server --groups all
 ```
 

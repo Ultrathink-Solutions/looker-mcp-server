@@ -22,7 +22,7 @@ from typing import Annotated, Any
 
 from fastmcp import FastMCP
 
-from ..client import LookerClient, format_api_error
+from ..client import LookerApiError, LookerClient, format_api_error
 from ._helpers import _path_seg, _set_if
 
 
@@ -216,6 +216,11 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                 for path, content in files.items():
                     pseg = _path_seg(project_id)
                     fseg = _path_seg(path)
+                    # Only fall back to POST on a confirmed 404 (the file
+                    # doesn't exist yet). Other errors — auth, permissions,
+                    # 5xx, network — must propagate rather than being
+                    # silently retried as a create, which would double
+                    # the side effects and mask the real cause.
                     try:
                         await session.patch(
                             f"/projects/{pseg}/files/{fseg}",
@@ -223,7 +228,9 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                             params=dev_params,
                         )
                         per_file.append({"path": path, "action": "updated"})
-                    except Exception:
+                    except LookerApiError as e:
+                        if e.status_code != 404:
+                            raise
                         await session.post(
                             f"/projects/{pseg}/files/{fseg}",
                             body={"id": path, "content": content},
@@ -368,6 +375,26 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                 user = await session.post("/users", body=user_body)
                 user_id = str((user or {}).get("id", ""))
                 steps.append({"step": "create_user", "user_id": user_id})
+
+                # Short-circuit if the create call didn't return a usable
+                # id. Downstream endpoints take a user_id path param;
+                # continuing with an empty id would issue malformed URLs
+                # like /users//credentials_email and surface Looker 404s
+                # that obscure the original root cause.
+                if not user_id:
+                    return json.dumps(
+                        {
+                            "error": "User creation returned no id.",
+                            "hint": (
+                                "Looker's POST /users responded without an "
+                                "'id' field. Check the response body for an "
+                                "API-level error before retrying."
+                            ),
+                            "user_response": user,
+                            "steps": steps,
+                        },
+                        indent=2,
+                    )
 
                 # Step 2: attach email credentials so the user can log in.
                 try:
