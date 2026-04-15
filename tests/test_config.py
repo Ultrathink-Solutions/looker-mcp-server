@@ -96,6 +96,7 @@ class TestGroupConstants:
             "modeling",
             "git",
             "admin",
+            "connection",
             "health",
         }
         assert ALL_GROUPS == expected

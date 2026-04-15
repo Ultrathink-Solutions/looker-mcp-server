@@ -79,6 +79,7 @@ def create_server(
 
     from .tools.admin import register_admin_tools
     from .tools.board import register_board_tools
+    from .tools.connection import register_connection_tools
     from .tools.content import register_content_tools
     from .tools.explore import register_explore_tools
     from .tools.folder import register_folder_tools
@@ -98,6 +99,7 @@ def create_server(
         "modeling": register_modeling_tools,
         "git": register_git_tools,
         "admin": register_admin_tools,
+        "connection": register_connection_tools,
         "health": register_health_tools,
     }
 

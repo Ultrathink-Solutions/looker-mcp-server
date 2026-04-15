@@ -20,6 +20,7 @@ ALL_GROUPS = frozenset(
         "modeling",
         "git",
         "admin",
+        "connection",
         "health",
     }
 )

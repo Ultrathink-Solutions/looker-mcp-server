@@ -10,7 +10,7 @@ A full-featured [Model Context Protocol](https://modelcontextprotocol.io) (MCP) 
 
 ## Features
 
-- **98 tools** across 10 groups covering the full Looker API surface
+- **104 tools** across 11 groups covering the full Looker API surface
 - **Semantic layer queries** — query through LookML models, not raw SQL
 - **OAuth pass-through** — forward user tokens from an upstream gateway or MCP OAuth flow
 - **User impersonation** — admin sudo on self-hosted Looker, OAuth on Google Cloud core
@@ -109,6 +109,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **modeling** | `list_projects`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `validate_project` | Edit LookML files and validate syntax |
 | **git** | `get_git_branch`, `list_git_branches`, `create_git_branch`, `switch_git_branch`, `deploy_to_production`, `reset_to_production` | Git operations and production deployment |
 | **admin** | `list_users`, `get_user`, `create_user`, `update_user`, `delete_user`, `create_credentials_email`, `send_password_reset`, `list_roles`, `get_role`, `create_role`, `update_role`, `delete_role`, `list_permissions`, `list_permission_sets`, `create_permission_set`, `update_permission_set`, `delete_permission_set`, `list_model_sets`, `create_model_set`, `update_model_set`, `delete_model_set`, `list_groups`, `create_group`, `delete_group`, `add_group_user`, `remove_group_user`, `set_role_groups`, `set_role_users`, `set_user_roles`, `get_user_roles`, `list_schedules`, `create_schedule`, `delete_schedule` | User, role, RBAC, group, and schedule management |
+| **connection** | `get_connection`, `list_connection_dialects`, `create_connection`, `update_connection`, `delete_connection`, `test_connection` | Database connection CRUD and health checks |
 
 ### Selecting Groups
 
@@ -119,7 +120,7 @@ looker-mcp-server
 # Specific groups
 looker-mcp-server --groups explore,query
 
-# All groups (including board, folder, modeling, git, admin)
+# All groups (including board, folder, modeling, git, admin, connection)
 looker-mcp-server --groups all
 ```
 
