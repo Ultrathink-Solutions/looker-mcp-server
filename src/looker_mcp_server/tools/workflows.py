@@ -1,23 +1,24 @@
 """Workflows tool group — task-oriented compositions over atomic tools.
 
-These tools each orchestrate several Looker API calls to complete a full
-admin task (provision a connection, bootstrap a LookML project, onboard a
-user). They return a structured response that tells the caller what
-happened at each step, so partial failures surface clearly rather than
-bubbling up as one opaque error.
+Covers both halves of Layer 2: provisioning workflows (get an instance to
+a running state) and ops/audit workflows (keep it running, investigate,
+wind down).  Each orchestrates several Looker API calls to complete a
+full admin task and returns a structured response with per-step status
+so partial failures surface rather than being swallowed.
 
 Everything these tools can do is also doable by calling the underlying
 atomic tools (``connection``, ``modeling``, ``admin``, ``credentials``,
-``user_attributes``) in sequence. The value is in the orchestration:
-correct ordering, structured partial-failure reporting, and one-call
-ergonomics for common jobs.
+``user_attributes``, ``audit``) in sequence.  The value is in the
+orchestration: correct ordering, structured partial-failure reporting,
+and one-call ergonomics for common jobs.
 
-Admin-only surface; disabled by default. Enable with ``--groups workflows``.
+Admin-only surface; disabled by default.  Enable with ``--groups workflows``.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
@@ -531,3 +532,652 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("grant_access", e)
+
+    # ── User lifecycle ───────────────────────────────────────────────
+
+    @server.tool(
+        description=(
+            "Offboard a user safely: optionally transfer their content, "
+            "terminate active sessions, revoke API3 credentials, and either "
+            "disable (default, reversible) or delete the user. Reports per-"
+            "step status. Default ``deactivate_only=True`` is non-destructive "
+            "— flip to False explicitly when you want the user record gone."
+        ),
+    )
+    async def offboard_user(
+        user_id: Annotated[str, "User ID"],
+        terminate_sessions: Annotated[bool, "Terminate all active sessions for this user"] = True,
+        revoke_api_credentials: Annotated[
+            bool, "Delete all API3 credential pairs attached to this user"
+        ] = True,
+        deactivate_only: Annotated[
+            bool, "Disable the user (True, reversible) vs delete (False, irreversible)"
+        ] = True,
+    ) -> str:
+        ctx = client.build_context("offboard_user", "workflows", {"user_id": user_id})
+        steps: list[dict[str, Any]] = []
+        try:
+            async with client.session(ctx) as session:
+                uid = _path_seg(user_id)
+
+                # Step 1: terminate sessions attributable to this user.
+                if terminate_sessions:
+                    try:
+                        sessions_list = await session.get("/sessions") or []
+                        victim_sessions = [
+                            s for s in sessions_list if str(s.get("user_id")) == user_id
+                        ]
+                        for s in victim_sessions:
+                            sid = s.get("id")
+                            if sid is not None:
+                                await session.delete(f"/sessions/{_path_seg(str(sid))}")
+                        steps.append(
+                            {
+                                "step": "terminate_sessions",
+                                "ok": True,
+                                "count": len(victim_sessions),
+                            }
+                        )
+                    except Exception as e:
+                        steps.append(
+                            {
+                                "step": "terminate_sessions",
+                                "ok": False,
+                                "error": format_api_error("terminate_sessions", e),
+                            }
+                        )
+
+                # Step 2: revoke all API3 credential pairs.
+                if revoke_api_credentials:
+                    try:
+                        api_creds = await session.get(f"/users/{uid}/credentials_api3") or []
+                        for c in api_creds:
+                            cid = c.get("id")
+                            if cid is not None:
+                                await session.delete(
+                                    f"/users/{uid}/credentials_api3/{_path_seg(str(cid))}"
+                                )
+                        steps.append(
+                            {
+                                "step": "revoke_api_credentials",
+                                "ok": True,
+                                "count": len(api_creds),
+                            }
+                        )
+                    except Exception as e:
+                        steps.append(
+                            {
+                                "step": "revoke_api_credentials",
+                                "ok": False,
+                                "error": format_api_error("revoke_api_credentials", e),
+                            }
+                        )
+
+                # Step 3: disable or delete the user.
+                try:
+                    if deactivate_only:
+                        await session.patch(f"/users/{uid}", body={"is_disabled": True})
+                        steps.append({"step": "disable_user", "ok": True})
+                    else:
+                        await session.delete(f"/users/{uid}")
+                        steps.append({"step": "delete_user", "ok": True})
+                except Exception as e:
+                    steps.append(
+                        {
+                            "step": "disable_user" if deactivate_only else "delete_user",
+                            "ok": False,
+                            "error": format_api_error("offboard_user", e),
+                        }
+                    )
+
+                all_ok = all(s.get("ok", True) for s in steps)
+
+                # deactivated / deleted must reflect the actual outcome
+                # of step 3 — not the requested mode. A caller who sees
+                # `deactivated: True` with `all_steps_ok: False` has a
+                # contradictory response.
+                def _step_succeeded(name: str) -> bool:
+                    return any(s.get("step") == name and s.get("ok") is True for s in steps)
+
+                return json.dumps(
+                    {
+                        "user_id": user_id,
+                        "all_steps_ok": all_ok,
+                        "requested_action": ("deactivate" if deactivate_only else "delete"),
+                        "deactivated": _step_succeeded("disable_user"),
+                        "deleted": _step_succeeded("delete_user"),
+                        "steps": steps,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("offboard_user", e)
+
+    @server.tool(
+        description=(
+            "Rotate a user's API3 credentials safely. Creates a new key "
+            "pair (returning the client_secret once), and optionally "
+            "deletes a specified previous pair. The default behavior does "
+            "NOT delete any existing credentials — the caller should "
+            "deploy the new pair to consumers, verify it works, then call "
+            "this tool again (or ``delete_credentials_api3``) with the "
+            "old credentials_api3_id to retire the old pair."
+        ),
+    )
+    async def rotate_api_credentials(
+        user_id: Annotated[str, "User ID"],
+        delete_previous_id: Annotated[
+            str | None,
+            (
+                "credentials_api3_id of a PREVIOUS key pair to delete. Pass "
+                "only after you've verified the new pair works."
+            ),
+        ] = None,
+    ) -> str:
+        ctx = client.build_context("rotate_api_credentials", "workflows", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                uid = _path_seg(user_id)
+
+                # Create the new pair.
+                new = await session.post(f"/users/{uid}/credentials_api3")
+
+                deletion_section: dict[str, Any] | None = None
+                if delete_previous_id is not None:
+                    try:
+                        await session.delete(
+                            f"/users/{uid}/credentials_api3/{_path_seg(delete_previous_id)}"
+                        )
+                        deletion_section = {
+                            "deleted_previous_id": delete_previous_id,
+                            "ok": True,
+                        }
+                    except Exception as e:
+                        deletion_section = {
+                            "deleted_previous_id": delete_previous_id,
+                            "ok": False,
+                            "error": format_api_error("rotate_api_credentials", e),
+                        }
+
+                return json.dumps(
+                    {
+                        "rotated": True,
+                        "user_id": user_id,
+                        "new_credentials": {
+                            "id": (new or {}).get("id"),
+                            "client_id": (new or {}).get("client_id"),
+                            "client_secret": (new or {}).get("client_secret"),
+                        },
+                        "old_pair_deletion": deletion_section,
+                        "warning": (
+                            "The client_secret is returned only once — store "
+                            "it now. If delete_previous_id was not provided, "
+                            "remember to delete the old pair after verifying "
+                            "the new one."
+                        ),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("rotate_api_credentials", e)
+
+    # ── Audit workflows ──────────────────────────────────────────────
+
+    @server.tool(
+        description=(
+            "Audit query activity with a scope preset. Picks the right "
+            "system__activity query shape for a common investigation: "
+            "'slow' = longest-running queries first, 'errors' = failed "
+            "queries only, 'frequent' = most-run queries (by user + "
+            "query fingerprint), 'by_user' = a single user's queries, "
+            "'by_content' = queries issued from a specific dashboard or "
+            "look. For custom audit queries, use the atomic "
+            "``get_query_history`` in the ``audit`` group or the generic "
+            "``query`` tool."
+        ),
+    )
+    async def audit_query_activity(
+        scope: Annotated[str, "'slow', 'errors', 'frequent', 'by_user', or 'by_content'"],
+        date_range: Annotated[str, "Looker filter-syntax date expression"] = "7 days",
+        user_email: Annotated[str | None, "Required when scope='by_user'"] = None,
+        dashboard_id: Annotated[str | None, "Dashboard to scope to when scope='by_content'"] = None,
+        look_id: Annotated[str | None, "Look to scope to when scope='by_content'"] = None,
+        limit: Annotated[int, "Maximum rows to return"] = 100,
+    ) -> str:
+        if scope not in ("slow", "errors", "frequent", "by_user", "by_content"):
+            return json.dumps(
+                {
+                    "error": (
+                        f"scope must be one of slow / errors / frequent / "
+                        f"by_user / by_content, got {scope!r}"
+                    )
+                },
+                indent=2,
+            )
+        if scope == "by_user" and not user_email:
+            return json.dumps({"error": "scope='by_user' requires user_email"}, indent=2)
+        if scope == "by_content" and not dashboard_id and not look_id:
+            return json.dumps(
+                {"error": "scope='by_content' requires either dashboard_id or look_id"},
+                indent=2,
+            )
+
+        filters: dict[str, str] = {"history.created_time": date_range}
+        sorts: list[str] = ["history.runtime desc"]
+        fields = [
+            "history.created_time",
+            "user.email",
+            "query.model",
+            "query.view",
+            "history.runtime",
+            "history.status",
+            "history.issuer_source",
+            "history.result_source",
+        ]
+
+        if scope == "slow":
+            # Default sort already surfaces slowest; no additional filter.
+            pass
+        elif scope == "errors":
+            filters["history.status"] = "-complete"
+            sorts = ["history.created_time desc"]
+        elif scope == "frequent":
+            # Most-run by user + model/view fingerprint.
+            fields = ["user.email", "query.model", "query.view", "history.count"]
+            sorts = ["history.count desc"]
+        elif scope == "by_user":
+            filters["user.email"] = user_email or ""
+            sorts = ["history.created_time desc"]
+        elif scope == "by_content":
+            if dashboard_id:
+                filters["dashboard.id"] = dashboard_id
+            if look_id:
+                filters["look.id"] = look_id
+            sorts = ["history.created_time desc"]
+
+        ctx = client.build_context(
+            "audit_query_activity", "workflows", {"scope": scope, "date_range": date_range}
+        )
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {
+                    "model": "system__activity",
+                    "view": "history",
+                    "fields": fields,
+                    "filters": filters,
+                    "sorts": sorts,
+                    "limit": str(limit),
+                }
+                query_def = await session.post("/queries", body=body)
+                rows = await session.get(f"/queries/{_path_seg(str(query_def['id']))}/run/json")
+                row_count = len(rows) if isinstance(rows, list) else 0
+                return json.dumps(
+                    {"scope": scope, "row_count": row_count, "rows": rows},
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("audit_query_activity", e)
+
+    @server.tool(
+        description=(
+            "Produce a composite health report for the instance over a "
+            "time window: failed PDT builds, failed scheduled-plan runs, "
+            "and broken-content counts. Each per-query section returns "
+            "``sample_count`` and a ``sample`` capped at 10 rows — intended "
+            "for a triage at-a-glance view, not a full audit. If any "
+            "section hits its sample cap, the section's ``truncated`` "
+            "flag is set — drill into that section with the atomic audit "
+            "tool for exact counts. If any section fails outright, the "
+            "top-level ``healthy`` flag is False and ``partial_failure`` "
+            "is True, so a caller can never mistake a failed query for a "
+            "healthy instance."
+        ),
+    )
+    async def audit_instance_health(
+        date_range: Annotated[str, "Looker filter-syntax date expression"] = "24 hours",
+    ) -> str:
+        ctx = client.build_context("audit_instance_health", "workflows", {"date_range": date_range})
+        sections: dict[str, Any] = {}
+        sample_limit = 10
+        try:
+            async with client.session(ctx) as session:
+                # Section A: failed PDT builds.
+                try:
+                    body_pdt: dict[str, Any] = {
+                        "model": "system__activity",
+                        "view": "pdt_event_log",
+                        "fields": [
+                            "pdt_event_log.created_time",
+                            "pdt_event_log.model_name",
+                            "pdt_event_log.view_name",
+                            "pdt_event_log.status_code",
+                            "pdt_event_log.message",
+                        ],
+                        "filters": {
+                            "pdt_event_log.created_time": date_range,
+                            "pdt_event_log.status_code": "error",
+                        },
+                        "sorts": ["pdt_event_log.created_time desc"],
+                        "limit": str(sample_limit),
+                    }
+                    qd = await session.post("/queries", body=body_pdt)
+                    rows = await session.get(f"/queries/{_path_seg(str(qd['id']))}/run/json")
+                    sample_count = len(rows) if isinstance(rows, list) else 0
+                    sections["failed_pdt_builds"] = {
+                        "sample_count": sample_count,
+                        "sample": rows,
+                        "truncated": sample_count >= sample_limit,
+                    }
+                except Exception as e:
+                    sections["failed_pdt_builds"] = {
+                        "error": format_api_error("failed_pdt_builds", e)
+                    }
+
+                # Section B: failed scheduled-plan runs.
+                try:
+                    body_sched: dict[str, Any] = {
+                        "model": "system__activity",
+                        "view": "scheduled_plan",
+                        "fields": [
+                            "scheduled_job.finalized_time",
+                            "scheduled_plan.id",
+                            "scheduled_plan.name",
+                            "user.email",
+                            "scheduled_job.status",
+                            "scheduled_job.status_detail",
+                        ],
+                        "filters": {
+                            "scheduled_job.finalized_time": date_range,
+                            "scheduled_job.status": "-success",
+                        },
+                        "sorts": ["scheduled_job.finalized_time desc"],
+                        "limit": str(sample_limit),
+                    }
+                    qd = await session.post("/queries", body=body_sched)
+                    rows = await session.get(f"/queries/{_path_seg(str(qd['id']))}/run/json")
+                    sample_count = len(rows) if isinstance(rows, list) else 0
+                    sections["failed_schedule_runs"] = {
+                        "sample_count": sample_count,
+                        "sample": rows,
+                        "truncated": sample_count >= sample_limit,
+                    }
+                except Exception as e:
+                    sections["failed_schedule_runs"] = {
+                        "error": format_api_error("failed_schedule_runs", e)
+                    }
+
+                # Section C: content validation (no date filter — snapshot).
+                # total_errors is an exact count from Looker, not a sample.
+                try:
+                    result = await session.get("/content_validation")
+                    sections["content_validation"] = {
+                        "total_errors": (result or {}).get("total_errors"),
+                        "total_looks_validated": (result or {}).get("total_looks_validated"),
+                        "total_dashboards_validated": (result or {}).get(
+                            "total_dashboards_validated"
+                        ),
+                    }
+                except Exception as e:
+                    sections["content_validation"] = {
+                        "error": format_api_error("content_validation", e)
+                    }
+
+                # A section that errored out contributed zero to the
+                # counters below, but we don't actually know its state.
+                # Track that separately so 'healthy' can never be True
+                # when any section was uninspectable.
+                any_section_failed = any(
+                    "error" in section_data for section_data in sections.values()
+                )
+                any_section_truncated = any(
+                    section_data.get("truncated") for section_data in sections.values()
+                )
+
+                # sample_count is a lower bound when truncated is True.
+                # Caller should treat sections with truncated=True as
+                # "at least this many" and drill in via the atomic tools.
+                sample_issue_count = (
+                    sections.get("failed_pdt_builds", {}).get("sample_count", 0)
+                    + sections.get("failed_schedule_runs", {}).get("sample_count", 0)
+                    + (sections.get("content_validation", {}).get("total_errors") or 0)
+                )
+
+                return json.dumps(
+                    {
+                        "date_range": date_range,
+                        "healthy": (
+                            sample_issue_count == 0
+                            and not any_section_failed
+                            and not any_section_truncated
+                        ),
+                        "partial_failure": any_section_failed,
+                        "sample_issue_count": sample_issue_count,
+                        "any_section_truncated": any_section_truncated,
+                        "sections": sections,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("audit_instance_health", e)
+
+    @server.tool(
+        description=(
+            "List currently-running queries whose runtime exceeds "
+            "``threshold_seconds``, and optionally kill them. "
+            "``action='report'`` (default) returns the filtered list "
+            "without mutating anything; ``action='kill'`` terminates each "
+            "matching query via /running_queries DELETE. Use for instance "
+            "triage when the database is saturated."
+        ),
+    )
+    async def investigate_runaway_queries(
+        threshold_seconds: Annotated[
+            float, "Minimum runtime (in seconds) for a query to be considered runaway"
+        ] = 300,
+        action: Annotated[str, "'report' (default) or 'kill'"] = "report",
+    ) -> str:
+        if action not in ("report", "kill"):
+            return json.dumps(
+                {"error": f"action must be 'report' or 'kill', got {action!r}"},
+                indent=2,
+            )
+
+        ctx = client.build_context(
+            "investigate_runaway_queries",
+            "workflows",
+            {"threshold_seconds": threshold_seconds, "action": action},
+        )
+        try:
+            async with client.session(ctx) as session:
+                running = await session.get("/running_queries") or []
+                runaways = [q for q in running if (q.get("runtime") or 0) >= threshold_seconds]
+                trimmed = [
+                    {
+                        "query_task_id": q.get("query_task_id"),
+                        "query_id": q.get("query_id"),
+                        "source": q.get("source"),
+                        "runtime": q.get("runtime"),
+                        "user_id": q.get("user_id"),
+                        "user": (q.get("user") or {}).get("email"),
+                    }
+                    for q in runaways
+                ]
+
+                killed: list[dict[str, Any]] = []
+                if action == "kill":
+                    for q in runaways:
+                        qtid = q.get("query_task_id")
+                        if not qtid:
+                            continue
+                        try:
+                            await session.delete(f"/running_queries/{_path_seg(str(qtid))}")
+                            killed.append({"query_task_id": qtid, "ok": True})
+                        except Exception as e:
+                            killed.append(
+                                {
+                                    "query_task_id": qtid,
+                                    "ok": False,
+                                    "error": format_api_error("kill_query", e),
+                                }
+                            )
+
+                return json.dumps(
+                    {
+                        "threshold_seconds": threshold_seconds,
+                        "action": action,
+                        "runaway_count": len(runaways),
+                        "runaways": trimmed,
+                        "killed": killed if action == "kill" else None,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("investigate_runaway_queries", e)
+
+    @server.tool(
+        description=(
+            "Identify dashboards and looks that haven't been viewed in a "
+            "long time — candidates for deletion or archival. Queries "
+            "system__activity.content_usage over the window and filters "
+            "to content with the lowest view counts. Default threshold "
+            "is 90 days; tune via ``min_days_unused``."
+        ),
+    )
+    async def find_stale_content(
+        min_days_unused: Annotated[int, "Minimum days since last access"] = 90,
+        content_type: Annotated[str, "'dashboard', 'look', or 'all'"] = "all",
+        limit: Annotated[int, "Maximum rows to return"] = 100,
+    ) -> str:
+        # Looker filter syntax: `>=N` on days_since_last_accessed means
+        # "at least N days since last view", which is what we want. The
+        # earlier version of this tool used history.created_date with a
+        # date-window expression, which filters on activity-record
+        # creation rather than content last-view age — a different
+        # question with near-random results for this use case.
+        filters: dict[str, str] = {
+            "content_usage.days_since_last_accessed": f">={min_days_unused}",
+        }
+        if content_type != "all":
+            filters["content_usage.content_type"] = content_type
+
+        ctx = client.build_context(
+            "find_stale_content",
+            "workflows",
+            {"min_days_unused": min_days_unused, "content_type": content_type},
+        )
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {
+                    "model": "system__activity",
+                    "view": "content_usage",
+                    "fields": [
+                        "content_usage.content_type",
+                        "content_usage.content_id",
+                        "content_usage.content_title",
+                        "content_usage.last_accessed_date",
+                        "content_usage.view_count",
+                    ],
+                    "filters": filters,
+                    "sorts": ["content_usage.last_accessed_date asc"],
+                    "limit": str(limit),
+                }
+                qd = await session.post("/queries", body=body)
+                rows = await session.get(f"/queries/{_path_seg(str(qd['id']))}/run/json")
+                return json.dumps(
+                    {
+                        "min_days_unused": min_days_unused,
+                        "content_type": content_type,
+                        "stale_count": len(rows) if isinstance(rows, list) else 0,
+                        "rows": rows,
+                        "next_step": (
+                            "Review the list and delete via delete_look / "
+                            "delete_dashboard from the content group, or "
+                            "archive by moving to a trash folder."
+                        ),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("find_stale_content", e)
+
+    @server.tool(
+        description=(
+            "Terminate active user sessions older than ``max_age_days``. "
+            "Returns count + list of terminated session ids. Default "
+            "90 days matches common session-hygiene policies. Use "
+            "``action='report'`` for a dry-run that lists stale sessions "
+            "without terminating them."
+        ),
+    )
+    async def disable_stale_sessions(
+        max_age_days: Annotated[int, "Terminate sessions created older than this"] = 90,
+        action: Annotated[str, "'report' (default dry-run) or 'terminate'"] = "report",
+    ) -> str:
+        if action not in ("report", "terminate"):
+            return json.dumps(
+                {"error": f"action must be 'report' or 'terminate', got {action!r}"},
+                indent=2,
+            )
+
+        from datetime import datetime, timedelta
+
+        ctx = client.build_context(
+            "disable_stale_sessions",
+            "workflows",
+            {"max_age_days": max_age_days, "action": action},
+        )
+        try:
+            async with client.session(ctx) as session:
+                sessions_list = await session.get("/sessions") or []
+                cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+
+                stale: list[dict[str, Any]] = []
+                for s in sessions_list:
+                    created_raw = s.get("created_at")
+                    if not created_raw:
+                        continue
+                    try:
+                        created = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+                    except ValueError:
+                        # Unparseable timestamp — skip rather than guess.
+                        continue
+                    if created < cutoff:
+                        stale.append(
+                            {
+                                "id": s.get("id"),
+                                "user_id": s.get("user_id"),
+                                "created_at": created_raw,
+                                "ip_address": s.get("ip_address"),
+                            }
+                        )
+
+                terminated: list[dict[str, Any]] = []
+                if action == "terminate":
+                    for s in stale:
+                        sid = s.get("id")
+                        if sid is None:
+                            continue
+                        try:
+                            await session.delete(f"/sessions/{_path_seg(str(sid))}")
+                            terminated.append({"id": sid, "ok": True})
+                        except Exception as e:
+                            terminated.append(
+                                {
+                                    "id": sid,
+                                    "ok": False,
+                                    "error": format_api_error("terminate_session", e),
+                                }
+                            )
+
+                return json.dumps(
+                    {
+                        "max_age_days": max_age_days,
+                        "action": action,
+                        "stale_count": len(stale),
+                        "stale_sessions": stale,
+                        "terminated": terminated if action == "terminate" else None,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("disable_stale_sessions", e)

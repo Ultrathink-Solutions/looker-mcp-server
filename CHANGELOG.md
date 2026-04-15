@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-04-15
+
+### Added
+
+- **workflows** tool group — ops + audit compositions (7 new tools added to the group established in 0.11.0). Each orchestrates several Looker API calls with structured partial-failure reporting.
+  - `offboard_user`: terminate sessions + revoke API3 credentials + disable (default) or delete user. Non-destructive by default — explicit flag required to delete. `deactivated`/`deleted` flags reflect the actual step outcome, not the request mode.
+  - `rotate_api_credentials`: create a new API3 pair (returning the one-time `client_secret`); optional `delete_previous_id` argument handles the retire-after-verify step in the same workflow.
+  - `audit_query_activity`: scope enum (`slow`/`errors`/`frequent`/`by_user`/`by_content`) that picks the right `system__activity.history` query shape for common investigations.
+  - `audit_instance_health`: composite 3-section health report — failed PDT builds, failed scheduled-plan runs, content validation errors. Reports `sample_count` + `truncated` per section; `healthy` is False when any section errored, was truncated, or has a non-zero issue count.
+  - `investigate_runaway_queries`: list running queries above a runtime threshold, optionally `action='kill'` to terminate each.
+  - `find_stale_content`: `content_usage` query filtered on `days_since_last_accessed >= N`, sorted oldest-first.
+  - `disable_stale_sessions`: enumerate sessions older than N days, optionally `action='terminate'` to force-logout each. Dry-run by default.
+- Total tool count: 153 → 160 across 15 groups
+
 ## [0.11.0] - 2026-04-15
 
 ### Added
@@ -17,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `provision_user`: end-to-end user onboarding in one call — create user + email credentials + role/group assignments + user-attribute values + invite email. Reports per-step status; guards against empty `user_id` from a malformed create response.
   - `grant_access`: idempotent read-modify-write to add a user or group to a role's membership. Preserves existing members.
 - Total tool count: 147 → 153 across 15 groups
+
 
 ## [0.10.0] - 2026-04-15
 
@@ -179,6 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.12.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.8.0...v0.9.0
