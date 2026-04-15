@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import json
 from typing import Annotated, Any
-from urllib.parse import quote
 
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
-from ._helpers import _set_if
+from ._helpers import _path_seg, _set_if
 
 # Looker's file endpoints are dev-mode-only and require an explicit
 # workspace_id query parameter.  Sessions are ephemeral (per tool call),
@@ -52,7 +51,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 files = await session.get(
-                    f"/projects/{quote(project_id, safe='')}/files", params=_DEV_PARAMS
+                    f"/projects/{_path_seg(project_id)}/files", params=_DEV_PARAMS
                 )
                 result = [
                     {
@@ -83,7 +82,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 file_info = await session.get(
-                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
+                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
                     params=_DEV_PARAMS,
                 )
                 return json.dumps(file_info, indent=2)
@@ -102,7 +101,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 file_info = await session.post(
-                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
+                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
                     body={"id": file_id, "content": content},
                     params=_DEV_PARAMS,
                 )
@@ -125,7 +124,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 file_info = await session.patch(
-                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
+                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
                     body={"content": content},
                     params=_DEV_PARAMS,
                 )
@@ -147,7 +146,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 await session.delete(
-                    f"/projects/{quote(project_id, safe='')}/files/{quote(file_id, safe='')}",
+                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
                     params=_DEV_PARAMS,
                 )
                 return json.dumps({"deleted": True, "file_id": file_id}, indent=2)
@@ -167,7 +166,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("get_project", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                project = await session.get(f"/projects/{quote(project_id, safe='')}")
+                project = await session.get(f"/projects/{_path_seg(project_id)}")
                 return json.dumps(project, indent=2)
         except Exception as e:
             return format_api_error("get_project", e)
@@ -273,7 +272,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                         indent=2,
                     )
 
-                project = await session.patch(f"/projects/{quote(project_id, safe='')}", body=body)
+                project = await session.patch(f"/projects/{_path_seg(project_id)}", body=body)
                 return json.dumps(
                     {
                         "id": project.get("id") if project else project_id,
@@ -297,7 +296,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("delete_project", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/projects/{quote(project_id, safe='')}")
+                await session.delete(f"/projects/{_path_seg(project_id)}")
                 return json.dumps({"deleted": True, "project_id": project_id}, indent=2)
         except Exception as e:
             return format_api_error("delete_project", e)
@@ -316,7 +315,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("get_project_manifest", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                manifest = await session.get(f"/projects/{quote(project_id, safe='')}/manifest")
+                manifest = await session.get(f"/projects/{_path_seg(project_id)}/manifest")
                 return json.dumps(manifest, indent=2)
         except Exception as e:
             return format_api_error("get_project_manifest", e)
@@ -336,7 +335,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 # Looker returns the public key as a raw string, not JSON.
-                key = await session.get(f"/projects/{quote(project_id, safe='')}/git/deploy_key")
+                key = await session.get(f"/projects/{_path_seg(project_id)}/git/deploy_key")
                 return json.dumps(
                     {"project_id": project_id, "public_key": key},
                     indent=2,
@@ -360,7 +359,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         )
         try:
             async with client.session(ctx) as session:
-                key = await session.post(f"/projects/{quote(project_id, safe='')}/git/deploy_key")
+                key = await session.post(f"/projects/{_path_seg(project_id)}/git/deploy_key")
                 return json.dumps(
                     {
                         "project_id": project_id,
@@ -389,9 +388,7 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("validate_project", "modeling", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                result = await session.post(
-                    f"/projects/{quote(project_id, safe='')}/lookml_validation"
-                )
+                result = await session.post(f"/projects/{_path_seg(project_id)}/lookml_validation")
                 errors = result.get("errors") or [] if result else []
                 warnings = result.get("warnings") or [] if result else []
                 return json.dumps(

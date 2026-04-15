@@ -53,7 +53,7 @@ class LookerSession:
     async def post(
         self,
         path: str,
-        body: dict[str, Any] | None = None,
+        body: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
         return await self._request("POST", path, params=params, json=body)
@@ -61,7 +61,7 @@ class LookerSession:
     async def patch(
         self,
         path: str,
-        body: dict[str, Any] | None = None,
+        body: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
         return await self._request("PATCH", path, params=params, json=body)
