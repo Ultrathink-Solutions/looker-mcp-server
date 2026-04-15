@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import json
 from typing import Annotated, Any
-from urllib.parse import quote
 
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+from ._helpers import _path_seg, _set_if
 
 
 def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None:
@@ -430,19 +430,3 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
                 )
         except Exception as e:
             return format_api_error("delete_user_attribute_user_value", e)
-
-
-def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
-    """Add ``key`` to ``body`` only when ``value`` is not ``None``."""
-    if value is not None:
-        body[key] = value
-
-
-def _path_seg(value: str | int) -> str:
-    """Percent-encode a single URL path segment.
-
-    Looker admin-facing IDs (user, group, user_attribute) are documented as
-    numeric, but encoding defensively keeps the routing layer safe from any
-    caller that passes an ID with reserved characters (space, slash, etc.).
-    """
-    return quote(str(value), safe="")
