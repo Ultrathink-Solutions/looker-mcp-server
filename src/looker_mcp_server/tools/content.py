@@ -324,3 +324,41 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
                 return json.dumps(result, indent=2)
         except Exception as e:
             return format_api_error("generate_embed_url", e)
+
+    @server.tool(
+        description=(
+            "Run Looker's content validator across all looks and dashboards "
+            "in the instance. Returns broken content references grouped by "
+            "error kind (e.g. missing explore, renamed field, deleted "
+            "model). Useful to audit breakage after a LookML change before "
+            "users see errors. Can be slow on large instances."
+        ),
+    )
+    async def validate_content() -> str:
+        ctx = client.build_context("validate_content", "content")
+        try:
+            async with client.session(ctx) as session:
+                result = await session.get("/content_validation")
+                errors = result.get("content_with_errors") or [] if result else []
+                summary: dict[str, int] = {}
+                for entry in errors:
+                    for e in entry.get("errors", []) or []:
+                        kind = e.get("kind") or "unknown"
+                        summary[kind] = summary.get(kind, 0) + 1
+                return json.dumps(
+                    {
+                        "total_errors": (result or {}).get("total_errors"),
+                        "total_looks_validated": (result or {}).get("total_looks_validated"),
+                        "total_dashboards_validated": (result or {}).get(
+                            "total_dashboards_validated"
+                        ),
+                        "total_dashboard_elements_validated": (result or {}).get(
+                            "total_dashboard_elements_validated"
+                        ),
+                        "errors_by_kind": summary,
+                        "broken_content": errors,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("validate_content", e)

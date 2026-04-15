@@ -12,6 +12,7 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+from ._helpers import _path_seg, _set_if
 
 
 def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
@@ -705,7 +706,144 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("delete_schedule", "admin", {"schedule_id": schedule_id})
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/scheduled_plans/{schedule_id}")
+                await session.delete(f"/scheduled_plans/{_path_seg(schedule_id)}")
                 return json.dumps({"deleted": True, "schedule_id": schedule_id}, indent=2)
         except Exception as e:
             return format_api_error("delete_schedule", e)
+
+    @server.tool(
+        description=(
+            "Update a scheduled delivery plan. Only provided fields are "
+            "changed; omitted fields are preserved. Use to retarget the "
+            "recipient, change the cron schedule, or toggle enabled state "
+            "without rebuilding the plan. Returns an actionable error when "
+            "no fields are supplied."
+        ),
+    )
+    async def update_schedule(
+        schedule_id: Annotated[str, "Scheduled plan ID to update"],
+        name: Annotated[str | None, "New display name"] = None,
+        crontab: Annotated[
+            str | None, "New cron expression (e.g. '0 9 * * *' for 9am daily)"
+        ] = None,
+        enabled: Annotated[bool | None, "Enable or disable the schedule"] = None,
+        run_as_recipient: Annotated[
+            bool | None, "Run the schedule impersonating each recipient"
+        ] = None,
+        include_links: Annotated[bool | None, "Include links in the scheduled content"] = None,
+    ) -> str:
+        ctx = client.build_context("update_schedule", "admin", {"schedule_id": schedule_id})
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {}
+                _set_if(body, "name", name)
+                _set_if(body, "crontab", crontab)
+                _set_if(body, "enabled", enabled)
+                _set_if(body, "run_as_recipient", run_as_recipient)
+                _set_if(body, "include_links", include_links)
+
+                if not body:
+                    return json.dumps(
+                        {
+                            "error": "No fields provided to update.",
+                            "hint": (
+                                "Pass at least one of: name, crontab, enabled, "
+                                "run_as_recipient, include_links."
+                            ),
+                        },
+                        indent=2,
+                    )
+
+                plan = await session.patch(f"/scheduled_plans/{_path_seg(schedule_id)}", body=body)
+                return json.dumps(
+                    {
+                        "id": plan.get("id") if plan else schedule_id,
+                        "updated": True,
+                        "fields_changed": sorted(body.keys()),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_schedule", e)
+
+    @server.tool(
+        description=(
+            "Trigger a scheduled plan to run once, immediately, outside its "
+            "normal cron schedule. Useful to deliver a fresh copy after "
+            "fixing a data issue, or to smoke-test a newly-created schedule."
+        ),
+    )
+    async def run_schedule_once(
+        schedule_id: Annotated[str, "Scheduled plan ID to trigger"],
+    ) -> str:
+        ctx = client.build_context("run_schedule_once", "admin", {"schedule_id": schedule_id})
+        try:
+            async with client.session(ctx) as session:
+                result = await session.post(f"/scheduled_plans/{_path_seg(schedule_id)}/run_once")
+                return json.dumps(
+                    {
+                        "schedule_id": schedule_id,
+                        "triggered": True,
+                        "id": result.get("id") if result else None,
+                        "next_step": (
+                            "Poll the system__activity scheduled_plan explore (via "
+                            "get_schedule_history in the audit group) to watch for "
+                            "completion and status."
+                        ),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("run_schedule_once", e)
+
+    # ── Role membership readers ──────────────────────────────────────
+
+    @server.tool(
+        description=(
+            "List the groups currently assigned to a role. Complements "
+            "``set_role_groups`` (which replaces the full set). Returns "
+            "``id`` and ``name`` for each assigned group."
+        ),
+    )
+    async def get_role_groups(
+        role_id: Annotated[str, "Role ID"],
+    ) -> str:
+        ctx = client.build_context("get_role_groups", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                groups_list = await session.get(f"/roles/{_path_seg(role_id)}/groups")
+                result = [{"id": g.get("id"), "name": g.get("name")} for g in (groups_list or [])]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("get_role_groups", e)
+
+    @server.tool(
+        description=(
+            "List the users assigned to a role directly (not via group "
+            "membership). Complements ``set_role_users`` (which replaces "
+            "the full set). Note: this does NOT include users who inherit "
+            "the role via a group — to find those, combine "
+            "``get_role_groups`` with each group's members, or check a "
+            "specific user's effective role set via ``get_user_roles``."
+        ),
+    )
+    async def get_role_users(
+        role_id: Annotated[str, "Role ID"],
+    ) -> str:
+        ctx = client.build_context("get_role_users", "admin", {"role_id": role_id})
+        try:
+            async with client.session(ctx) as session:
+                users_list = await session.get(f"/roles/{_path_seg(role_id)}/users")
+                result = [
+                    {
+                        "id": u.get("id"),
+                        "email": u.get("email"),
+                        "first_name": u.get("first_name"),
+                        "last_name": u.get("last_name"),
+                        "is_disabled": u.get("is_disabled"),
+                    }
+                    for u in (users_list or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("get_role_users", e)
