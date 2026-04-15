@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-15
+
+### Added
+
+- **connection** tool group (6 tools): database connection CRUD with built-in health checks — enables end-to-end setup of a new Looker instance without leaving MCP.
+  - `get_connection`: fetch full configuration for a single connection (dialect, host, PDT settings, etc.)
+  - `list_connection_dialects`: discover supported dialects and their accepted options before creating a connection
+  - `create_connection`: register a new database connection (all fields except `name` and `dialect_name` are optional and only sent when provided, so Looker defaults are preserved)
+  - `update_connection`: partial update — only provided fields are patched; returns an actionable error when no fields are supplied
+  - `delete_connection`: remove a connection (warns in the description that dependent LookML will fail)
+  - `test_connection`: runs Looker's built-in per-check validator (connect, query, tmp_table, cdt, pdt, kill) and returns a structured breakdown so agents can correct specific failing checks without re-running the full suite
+- Total tool count: 98 → 104 across 11 groups
+
 ## [0.4.0] - 2026-04-02
 
 ### Added
