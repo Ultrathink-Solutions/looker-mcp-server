@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastmcp import FastMCP
 
@@ -33,7 +34,7 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("get_connection", "connection", {"name": name})
         try:
             async with client.session(ctx) as session:
-                conn = await session.get(f"/connections/{name}")
+                conn = await session.get(f"/connections/{quote(name, safe='')}")
                 return json.dumps(conn, indent=2)
         except Exception as e:
             return format_api_error("get_connection", e)
@@ -182,7 +183,7 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
                         indent=2,
                     )
 
-                conn = await session.patch(f"/connections/{name}", body=body)
+                conn = await session.patch(f"/connections/{quote(name, safe='')}", body=body)
                 return json.dumps(
                     {
                         "name": conn.get("name"),
@@ -209,7 +210,7 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("delete_connection", "connection", {"name": name})
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/connections/{name}")
+                await session.delete(f"/connections/{quote(name, safe='')}")
                 return json.dumps({"deleted": True, "name": name}, indent=2)
         except Exception as e:
             return format_api_error("delete_connection", e)
@@ -242,7 +243,9 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 params = {"tests": ",".join(tests)} if tests else None
-                results = await session.put(f"/connections/{name}/test", params=params)
+                results = await session.put(
+                    f"/connections/{quote(name, safe='')}/test", params=params
+                )
                 summary = [
                     {
                         "check": r.get("name"),

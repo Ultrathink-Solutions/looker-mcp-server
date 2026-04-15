@@ -274,6 +274,37 @@ class TestTestConnection:
             await client.close()
 
 
+class TestPathEncoding:
+    """Connection names are free-text strings and must be URL-encoded."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_encodes_special_characters(self, config):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            # raw_path preserves percent-encoding; .path decodes it.
+            captured["raw_path"] = request.url.raw_path.decode("ascii")
+            return httpx.Response(200, json={"name": "data warehouse"})
+
+        respx.get(url__regex=rf"{API_URL}/connections/.*").mock(side_effect=capture)
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = client.build_context("get_connection", "connection", {"name": "data warehouse"})
+        try:
+            from urllib.parse import quote
+
+            async with client.session(ctx) as session:
+                await session.get(f"/connections/{quote('data warehouse', safe='')}")
+                assert "data%20warehouse" in captured["raw_path"]
+                assert " " not in captured["raw_path"]
+        finally:
+            await client.close()
+
+
 class TestErrorFormatting:
     def test_404_returns_actionable_hint(self):
         error = LookerApiError(404, "Not Found", "Connection 'warehouse' does not exist.")

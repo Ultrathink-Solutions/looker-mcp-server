@@ -10,7 +10,7 @@ A full-featured [Model Context Protocol](https://modelcontextprotocol.io) (MCP) 
 
 ## Features
 
-- **98 tools** across 10 groups covering the full Looker API surface
+- **104 tools** across 11 groups covering the full Looker API surface
 - **Semantic layer queries** — query through LookML models, not raw SQL
 - **OAuth pass-through** — forward user tokens from an upstream gateway or MCP OAuth flow
 - **User impersonation** — admin sudo on self-hosted Looker, OAuth on Google Cloud core
@@ -120,7 +120,7 @@ looker-mcp-server
 # Specific groups
 looker-mcp-server --groups explore,query
 
-# All groups (including board, folder, modeling, git, admin)
+# All groups (including board, folder, modeling, git, admin, connection)
 looker-mcp-server --groups all
 ```
 
