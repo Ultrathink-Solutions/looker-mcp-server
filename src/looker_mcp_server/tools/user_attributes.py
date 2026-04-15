@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastmcp import FastMCP
 
@@ -68,7 +69,7 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         )
         try:
             async with client.session(ctx) as session:
-                attr = await session.get(f"/user_attributes/{user_attribute_id}")
+                attr = await session.get(f"/user_attributes/{_path_seg(user_attribute_id)}")
                 return json.dumps(attr, indent=2)
         except Exception as e:
             return format_api_error("get_user_attribute", e)
@@ -179,7 +180,9 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
                         indent=2,
                     )
 
-                attr = await session.patch(f"/user_attributes/{user_attribute_id}", body=body)
+                attr = await session.patch(
+                    f"/user_attributes/{_path_seg(user_attribute_id)}", body=body
+                )
                 return json.dumps(
                     {
                         "id": attr.get("id") if attr else user_attribute_id,
@@ -208,7 +211,7 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         )
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/user_attributes/{user_attribute_id}")
+                await session.delete(f"/user_attributes/{_path_seg(user_attribute_id)}")
                 return json.dumps(
                     {"deleted": True, "user_attribute_id": user_attribute_id},
                     indent=2,
@@ -236,7 +239,9 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         )
         try:
             async with client.session(ctx) as session:
-                values = await session.get(f"/user_attributes/{user_attribute_id}/group_values")
+                values = await session.get(
+                    f"/user_attributes/{_path_seg(user_attribute_id)}/group_values"
+                )
                 result = [
                     {
                         "group_id": v.get("group_id"),
@@ -278,7 +283,7 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         try:
             async with client.session(ctx) as session:
                 updated = await session.post(
-                    f"/user_attributes/{user_attribute_id}/group_values",
+                    f"/user_attributes/{_path_seg(user_attribute_id)}/group_values",
                     body=values,
                 )
                 return json.dumps(
@@ -310,7 +315,9 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         )
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/groups/{group_id}/attribute_values/{user_attribute_id}")
+                await session.delete(
+                    f"/groups/{_path_seg(group_id)}/attribute_values/{_path_seg(user_attribute_id)}"
+                )
                 return json.dumps(
                     {
                         "deleted": True,
@@ -341,7 +348,7 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         )
         try:
             async with client.session(ctx) as session:
-                values = await session.get(f"/users/{user_id}/attribute_values")
+                values = await session.get(f"/users/{_path_seg(user_id)}/attribute_values")
                 result = [
                     {
                         "user_attribute_id": v.get("user_attribute_id"),
@@ -377,7 +384,7 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         try:
             async with client.session(ctx) as session:
                 result = await session.patch(
-                    f"/users/{user_id}/attribute_values/{user_attribute_id}",
+                    f"/users/{_path_seg(user_id)}/attribute_values/{_path_seg(user_attribute_id)}",
                     body={"value": value},
                 )
                 return json.dumps(
@@ -410,7 +417,9 @@ def register_user_attribute_tools(server: FastMCP, client: LookerClient) -> None
         )
         try:
             async with client.session(ctx) as session:
-                await session.delete(f"/users/{user_id}/attribute_values/{user_attribute_id}")
+                await session.delete(
+                    f"/users/{_path_seg(user_id)}/attribute_values/{_path_seg(user_attribute_id)}"
+                )
                 return json.dumps(
                     {
                         "deleted": True,
@@ -427,3 +436,13 @@ def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
     """Add ``key`` to ``body`` only when ``value`` is not ``None``."""
     if value is not None:
         body[key] = value
+
+
+def _path_seg(value: str | int) -> str:
+    """Percent-encode a single URL path segment.
+
+    Looker admin-facing IDs (user, group, user_attribute) are documented as
+    numeric, but encoding defensively keeps the routing layer safe from any
+    caller that passes an ID with reserved characters (space, slash, etc.).
+    """
+    return quote(str(value), safe="")

@@ -24,9 +24,12 @@ def config():
 
 
 @pytest.fixture
-def server_and_client(config):
+async def server_and_client(config):
     mcp, client = create_server(config, enabled_groups={"user_attributes"})
-    return mcp, client
+    try:
+        yield mcp, client
+    finally:
+        await client.close()
 
 
 API_URL = "https://test.looker.com/api/4.0"
@@ -40,7 +43,8 @@ def _mock_login_logout():
 
 
 class TestServerRegistration:
-    def test_user_attributes_registers(self, server_and_client):
+    @pytest.mark.asyncio
+    async def test_user_attributes_registers(self, server_and_client):
         mcp, _ = server_and_client
         assert mcp is not None
 
