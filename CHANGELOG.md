@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-04-15
+
+### Added
+
+- **workflows** tool group (6 tools): Layer 2 task-oriented compositions over the Layer 1 atomic tools. Each orchestrates 2–5 Looker API calls into a single well-sequenced admin job with structured partial-failure reporting. Aligned with Anthropic's tool-design research: fewer higher-level tools improve agent tool-selection accuracy relative to many atomic ones.
+  - `provision_connection`: create + test a database connection; returns per-check test breakdown. Connection is left registered even on test failure so the caller can correct the specific failing check.
+  - `bootstrap_lookml_project`: create a LookML project, attach it to a git remote, and generate an SSH deploy key. Response includes the public key for installation on the git remote.
+  - `deploy_lookml_changes`: write a set of LookML file edits, validate, and — only if validation passes — deploy to production. Only falls back to create on a confirmed 404; other PATCH failures (auth, 5xx) propagate rather than being silently retried.
+  - `rollback_to_production`: safe wrapper around `reset_to_production` requiring an explicit `confirm=True` flag, since the operation is destructive.
+  - `provision_user`: end-to-end user onboarding in one call — create user + email credentials + role/group assignments + user-attribute values + invite email. Reports per-step status; guards against empty `user_id` from a malformed create response.
+  - `grant_access`: idempotent read-modify-write to add a user or group to a role's membership. Preserves existing members.
+- Total tool count: 147 → 153 across 15 groups
+
 ## [0.10.0] - 2026-04-15
 
 ### Added
@@ -19,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **content** group — content-validation audit (1 tool):
   - `validate_content`: run Looker's content validator across all looks and dashboards. Returns broken references grouped by error kind plus totals — useful before users see errors from a LookML change.
 - Total tool count: 140 → 147 across 14 groups
+
 
 ## [0.9.0] - 2026-04-15
 
@@ -165,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.11.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.7.0...v0.8.0
