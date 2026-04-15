@@ -33,17 +33,13 @@ def _mock_login_logout():
     respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
 
 
-def _invoke_tool(mcp, tool_name: str, args: dict):
-    """Helper to call a tool via fastmcp Client and return the parsed payload."""
-
-    async def _run():
-        async with Client(mcp) as mcp_client:
-            result = await mcp_client.call_tool(tool_name, args)
-            content = result.content[0]
-            assert isinstance(content, TextContent)
-            return json.loads(content.text)
-
-    return _run
+async def _invoke_tool(mcp, tool_name: str, args: dict):
+    """Call a tool through the MCP server and return the parsed payload."""
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool(tool_name, args)
+        content = result.content[0]
+        assert isinstance(content, TextContent)
+        return json.loads(content.text)
 
 
 # ══ provision_connection ═════════════════════════════════════════════
@@ -76,7 +72,7 @@ class TestProvisionConnection:
                 mcp,
                 "provision_connection",
                 {"name": "warehouse", "dialect_name": "snowflake"},
-            )()
+            )
             assert payload["created"] is True
             assert payload["test"]["ran"] is True
             assert payload["test"]["healthy"] is True
@@ -115,7 +111,7 @@ class TestProvisionConnection:
                 mcp,
                 "provision_connection",
                 {"name": "warehouse", "dialect_name": "snowflake"},
-            )()
+            )
             assert payload["created"] is True
             assert payload["test"]["ran"] is True
             assert payload["test"]["healthy"] is False
@@ -160,7 +156,7 @@ class TestBootstrapLookmlProject:
                     "git_remote_url": "git@github.com:example/analytics.git",
                     "git_service_name": "github",
                 },
-            )()
+            )
             assert payload["created"] is True
             assert payload["project_id"] == "analytics"
             assert "ssh-ed25519" in payload["deploy_key_public"]
@@ -218,7 +214,7 @@ class TestDeployLookmlChanges:
                     "files": {"views/orders.view.lkml": "view: orders {}"},
                     "validate": True,
                 },
-            )()
+            )
             assert payload["deployed"] is False
             assert payload["validation"]["valid"] is False
             assert payload["validation"]["error_count"] == 1
@@ -243,7 +239,14 @@ class TestDeployLookmlChanges:
         respx.patch(url__regex=rf"{API_URL}/projects/analytics/files/.*").mock(
             return_value=httpx.Response(500, json={"message": "internal server error"})
         )
-        # No POST or deploy mocks — if either is called, the test errors.
+        # Explicit routes for the forbidden calls so .called gives a
+        # clear yes/no signal rather than having to filter respx.calls.
+        create_fallback_route = respx.post(
+            url__regex=rf"{API_URL}/projects/analytics/files/.*"
+        ).mock(return_value=httpx.Response(201, json={"id": "unexpected"}))
+        deploy_route = respx.post(f"{API_URL}/projects/analytics/deploy_to_production").mock(
+            return_value=httpx.Response(200, json={})
+        )
 
         mcp, client = create_server(config, enabled_groups={"workflows"})
         try:
@@ -255,22 +258,14 @@ class TestDeployLookmlChanges:
                     "files": {"views/orders.view.lkml": "view: orders {}"},
                     "validate": True,
                 },
-            )()
+            )
             # Error surfaces to caller — tool's top-level exception
             # handler returns the format_api_error envelope.
             assert "error" in payload
-            # Safety invariants: no create-as-fallback, no validation,
-            # no deploy. The tool fails fast on the first bad PATCH.
-            post_calls = [
-                c
-                for c in respx.calls
-                if c.request.method == "POST" and "/files/" in c.request.url.path
-            ]
-            assert post_calls == []
-            deploy_calls = [
-                c for c in respx.calls if c.request.url.path.endswith("/deploy_to_production")
-            ]
-            assert deploy_calls == []
+            # Safety invariants: no create-as-fallback, no deploy.
+            # The tool fails fast on the first bad PATCH.
+            assert create_fallback_route.called is False
+            assert deploy_route.called is False
         finally:
             await client.close()
 
@@ -309,7 +304,7 @@ class TestDeployLookmlChanges:
                     "project_id": "analytics",
                     "files": {"views/new.view.lkml": "view: new {}"},
                 },
-            )()
+            )
             assert payload["deployed"] is True
             assert payload["files"][0]["action"] == "created"
             assert create_captured["called"] is True
@@ -345,7 +340,7 @@ class TestDeployLookmlChanges:
                     "project_id": "analytics",
                     "files": {"views/orders.view.lkml": "view: orders {}"},
                 },
-            )()
+            )
             assert payload["deployed"] is True
             assert deploy_captured["called"] is True
         finally:
@@ -362,7 +357,7 @@ class TestDeployLookmlChanges:
                 mcp,
                 "deploy_lookml_changes",
                 {"project_id": "analytics", "files": {}},
-            )()
+            )
             assert payload["error"] == "No files provided."
         finally:
             await client.close()
@@ -380,9 +375,7 @@ class TestRollbackToProduction:
 
         mcp, client = create_server(config, enabled_groups={"workflows"})
         try:
-            payload = await _invoke_tool(
-                mcp, "rollback_to_production", {"project_id": "analytics"}
-            )()
+            payload = await _invoke_tool(mcp, "rollback_to_production", {"project_id": "analytics"})
             assert payload["error"] == "Confirmation required."
             # Safety: no POST to reset_to_production happened.
             assert [c for c in respx.calls if "reset_to_production" in c.request.url.path] == []
@@ -403,7 +396,7 @@ class TestRollbackToProduction:
                 mcp,
                 "rollback_to_production",
                 {"project_id": "analytics", "confirm": True},
-            )()
+            )
             assert payload["reset"] is True
         finally:
             await client.close()
@@ -444,7 +437,7 @@ class TestProvisionUser:
                     "user_attribute_values": {"5": "EMEA"},
                     "send_invite": True,
                 },
-            )()
+            )
             assert payload["all_steps_ok"] is True
             step_names = [s["step"] for s in payload["steps"]]
             assert "create_user" in step_names
@@ -483,7 +476,7 @@ class TestProvisionUser:
                     "last_name": "Example",
                     "send_invite": True,
                 },
-            )()
+            )
             assert payload["all_steps_ok"] is False
             creds_step = next(
                 s for s in payload["steps"] if s["step"] == "create_credentials_email"
@@ -519,7 +512,7 @@ class TestProvisionUser:
                     "user_attribute_values": {"5": "EMEA"},
                     "send_invite": True,
                 },
-            )()
+            )
             assert "error" in payload
             assert "no id" in payload["error"].lower()
             # No downstream POSTs happened — tool failed fast.
@@ -558,7 +551,7 @@ class TestGrantAccess:
                 mcp,
                 "grant_access",
                 {"principal_type": "user", "principal_id": "42", "role_id": "5"},
-            )()
+            )
             assert payload["granted"] is True
             # Augmented list preserves the existing member.
             assert set(captured["body"]) == {1, 42}
@@ -580,7 +573,7 @@ class TestGrantAccess:
                 mcp,
                 "grant_access",
                 {"principal_type": "group", "principal_id": "7", "role_id": "5"},
-            )()
+            )
             assert payload["already_granted"] is True
             # Verify no PUT call was made.
             assert [c for c in respx.calls if c.request.method == "PUT"] == []
@@ -598,7 +591,7 @@ class TestGrantAccess:
                 mcp,
                 "grant_access",
                 {"principal_type": "service", "principal_id": "1", "role_id": "5"},
-            )()
+            )
             assert "error" in payload
             assert "principal_type" in payload["error"]
         finally:
