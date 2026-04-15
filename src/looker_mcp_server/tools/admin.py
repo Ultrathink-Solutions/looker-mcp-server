@@ -819,10 +819,12 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "List the users currently assigned to a role directly (not via "
-            "group membership). Complements ``set_role_users`` (which "
-            "replaces the full set). For effective role membership via "
-            "groups, use ``list_users`` with a ``role_ids`` filter."
+            "List the users assigned to a role directly (not via group "
+            "membership). Complements ``set_role_users`` (which replaces "
+            "the full set). Note: this does NOT include users who inherit "
+            "the role via a group — to find those, combine "
+            "``get_role_groups`` with each group's members, or check a "
+            "specific user's effective role set via ``get_user_roles``."
         ),
     )
     async def get_role_users(
