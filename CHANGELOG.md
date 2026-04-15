@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-04-15
+
+### Added
+
+- **admin** group — schedule and role-membership completion (4 tools):
+  - `update_schedule`: PATCH a scheduled plan (was missing; only create/list/delete existed).
+  - `run_schedule_once`: trigger a plan outside its cron schedule for manual delivery or smoke testing.
+  - `get_role_groups` / `get_role_users`: read current group- and user-membership of a role. Complement existing `set_role_*` setters so callers can read-modify-write safely.
+- **modeling** group — datagroup cache management (2 tools):
+  - `list_datagroups`: enumerate datagroups with their trigger/stale markers.
+  - `reset_datagroup`: invalidate a datagroup's cache by setting `stale_before` to the current unix timestamp.
+- **content** group — content-validation audit (1 tool):
+  - `validate_content`: run Looker's content validator across all looks and dashboards. Returns broken references grouped by error kind plus totals — useful before users see errors from a LookML change.
+- Total tool count: 140 → 147 across 14 groups
+
 ## [0.9.0] - 2026-04-15
 
 ### Added
@@ -150,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.10.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.6.0...v0.7.0

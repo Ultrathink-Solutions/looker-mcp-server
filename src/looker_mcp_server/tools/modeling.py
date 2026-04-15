@@ -419,3 +419,66 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("validate_project", e)
+
+    # ── Datagroups (cache management) ────────────────────────────────
+
+    @server.tool(
+        description=(
+            "List all datagroups (LookML cache policies) defined in the "
+            "instance. Returns each datagroup with its model, last trigger "
+            "time, and current stale_before marker. Datagroups are how "
+            "LookML controls when Looker's query cache is invalidated."
+        ),
+    )
+    async def list_datagroups() -> str:
+        ctx = client.build_context("list_datagroups", "modeling")
+        try:
+            async with client.session(ctx) as session:
+                datagroups = await session.get("/datagroups")
+                result = [
+                    {
+                        "id": d.get("id"),
+                        "model_name": d.get("model_name"),
+                        "name": d.get("name"),
+                        "trigger_check_at": d.get("trigger_check_at"),
+                        "triggered_at": d.get("triggered_at"),
+                        "stale_before": d.get("stale_before"),
+                    }
+                    for d in (datagroups or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_datagroups", e)
+
+    @server.tool(
+        description=(
+            "Invalidate the cache for a datagroup by setting its "
+            "``stale_before`` to the current time. All cached query results "
+            "associated with this datagroup will be considered stale on the "
+            "next read, forcing a fresh query. Use after a manual data "
+            "correction or to flush a stuck PDT."
+        ),
+    )
+    async def reset_datagroup(
+        datagroup_id: Annotated[str, "Datagroup ID (from list_datagroups)"],
+    ) -> str:
+        import time
+
+        ctx = client.build_context("reset_datagroup", "modeling", {"datagroup_id": datagroup_id})
+        try:
+            async with client.session(ctx) as session:
+                # stale_before is a unix timestamp; setting it to now()
+                # invalidates the cache for all queries tagged with this
+                # datagroup.
+                body = {"stale_before": int(time.time())}
+                updated = await session.patch(f"/datagroups/{_path_seg(datagroup_id)}", body=body)
+                return json.dumps(
+                    {
+                        "id": updated.get("id") if updated else datagroup_id,
+                        "reset": True,
+                        "stale_before": body["stale_before"],
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("reset_datagroup", e)
