@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 from fastmcp import Client
+from mcp.types import TextContent
 
 from looker_mcp_server.client import LookerClient
 from looker_mcp_server.config import LookerConfig
@@ -147,13 +148,9 @@ class TestUpdateProjectNoFields:
                     "update_project",
                     {"project_id": "analytics"},
                 )
-                from mcp.types import TextContent
-
                 content = result.content[0]
                 # Tool returns a plain JSON string, which fastmcp wraps in TextContent.
-                assert isinstance(content, TextContent), (
-                    f"Unexpected content type: {type(content)}"
-                )
+                assert isinstance(content, TextContent), f"Unexpected content type: {type(content)}"
                 payload = json.loads(content.text)
                 assert payload["error"] == "No fields provided to update."
                 assert "hint" in payload
