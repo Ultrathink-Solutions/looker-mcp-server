@@ -15,6 +15,7 @@ from urllib.parse import quote
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+from ._helpers import _set_if
 
 
 def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
@@ -265,14 +266,3 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("test_connection", e)
-
-
-def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
-    """Add ``key`` to ``body`` only when ``value`` is not ``None``.
-
-    Kept as a helper so tool signatures stay flat (optional ``| None`` args)
-    without forwarding explicit ``None`` values that Looker would interpret
-    as "clear this field".
-    """
-    if value is not None:
-        body[key] = value

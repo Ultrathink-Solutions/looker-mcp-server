@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-15
+
+### Added
+
+- **modeling** group — project lifecycle tools (7 new tools): full LookML project CRUD plus manifest inspection and deploy-key management.
+  - `get_project`: fetch full configuration for a single project (git remote, pull-request mode, validation policy, release management flags)
+  - `create_project`: provision a new empty project; includes next-step guidance in the response
+  - `update_project`: partial update covering git remote settings, pull-request mode, validation, and release management
+  - `delete_project`: remove a project
+  - `get_project_manifest`: read the parsed LookML manifest (declared dependencies, connection references)
+  - `get_project_deploy_key`: read the project's existing SSH deploy public key
+  - `create_project_deploy_key`: generate (or rotate) the project's SSH deploy key pair and return the public half for installation on the git remote
+- Project-level path parameters are now URL-encoded in all newly added tools so values with reserved characters round-trip correctly.
+- Total tool count: 104 → 111 across 11 groups
+
 ## [0.5.0] - 2026-04-15
 
 ### Added
@@ -101,6 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.6.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.2.0...v0.3.0
