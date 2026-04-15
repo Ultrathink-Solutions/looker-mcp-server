@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-04-15
+
+### Added
+
+- **credentials** tool group (12 tools): manage non-email user credentials. Complements the existing `create_credentials_email` in the `admin` group.
+  - API3 key-pair lifecycle: `list_credentials_api3`, `create_credentials_api3`, `get_credentials_api3`, `delete_credentials_api3`. `create_credentials_api3` returns the `client_secret` in the response with a prominent one-time-only warning (Looker never surfaces the secret again) — this is the supported rotation path for service-account credentials.
+  - LDAP / SAML / OIDC / Google links: `get_credentials_{type}` and `delete_credentials_{type}` for each. Deletion unlinks the user from that identity provider; most providers re-link automatically on the user's next successful sign-in.
+- Total tool count: 115 → 127 across 13 groups
+
 ## [0.7.0] - 2026-04-15
 
 ### Added
@@ -132,6 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.8.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.6.0...v0.7.0
 [0.5.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.3.0...v0.4.0
