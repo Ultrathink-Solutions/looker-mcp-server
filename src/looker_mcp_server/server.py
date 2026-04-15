@@ -78,6 +78,7 @@ def create_server(
     groups = enabled_groups or DEFAULT_GROUPS
 
     from .tools.admin import register_admin_tools
+    from .tools.audit import register_audit_tools
     from .tools.board import register_board_tools
     from .tools.connection import register_connection_tools
     from .tools.content import register_content_tools
@@ -104,6 +105,7 @@ def create_server(
         "connection": register_connection_tools,
         "user_attributes": register_user_attribute_tools,
         "credentials": register_credentials_tools,
+        "audit": register_audit_tools,
         "health": register_health_tools,
     }
 

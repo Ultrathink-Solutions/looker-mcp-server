@@ -99,6 +99,7 @@ class TestGroupConstants:
             "connection",
             "user_attributes",
             "credentials",
+            "audit",
             "health",
         }
         assert ALL_GROUPS == expected
