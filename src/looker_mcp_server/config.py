@@ -24,6 +24,7 @@ ALL_GROUPS = frozenset(
         "user_attributes",
         "credentials",
         "audit",
+        "workflows",
         "health",
     }
 )
