@@ -10,7 +10,7 @@ A full-featured [Model Context Protocol](https://modelcontextprotocol.io) (MCP) 
 
 ## Features
 
-- **153 tools** across 15 groups covering the full Looker API surface
+- **160 tools** across 15 groups covering the full Looker API surface
 - **Semantic layer queries** — query through LookML models, not raw SQL
 - **OAuth pass-through** — forward user tokens from an upstream gateway or MCP OAuth flow
 - **User impersonation** — admin sudo on self-hosted Looker, OAuth on Google Cloud core
@@ -113,7 +113,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **user_attributes** | `list_user_attributes`, `get_user_attribute`, `create_user_attribute`, `update_user_attribute`, `delete_user_attribute`, `list_user_attribute_group_values`, `set_user_attribute_group_values`, `delete_user_attribute_group_value`, `list_user_attribute_values_for_user`, `set_user_attribute_user_value`, `delete_user_attribute_user_value` | User attribute definitions plus per-group and per-user value overrides (row-level security, per-developer credentials, filter defaults) |
 | **credentials** | `list_credentials_api3`, `create_credentials_api3`, `get_credentials_api3`, `delete_credentials_api3`, `get_credentials_ldap`, `delete_credentials_ldap`, `get_credentials_saml`, `delete_credentials_saml`, `get_credentials_oidc`, `delete_credentials_oidc`, `get_credentials_google`, `delete_credentials_google` | Non-email credentials — API3 key-pair rotation plus get/delete for LDAP, SAML, OIDC, and Google SSO links |
 | **audit** | `get_query_history`, `get_content_usage`, `get_pdt_build_log`, `get_schedule_history`, `get_user_activity_log`, `list_running_queries`, `kill_query`, `list_active_sessions`, `get_session`, `terminate_session`, `list_project_ci_runs`, `get_project_ci_run`, `trigger_project_ci_run` | Query history, content usage, PDT build + schedule + event logs via system__activity, plus live-ops (running queries, sessions, CI runs) |
-| **workflows** | `provision_connection`, `bootstrap_lookml_project`, `deploy_lookml_changes`, `rollback_to_production`, `provision_user`, `grant_access` | Task-oriented compositions over atomic tools — one-call ergonomics for common admin jobs (provisioning, deploying LookML, onboarding users) |
+| **workflows** | `provision_connection`, `bootstrap_lookml_project`, `deploy_lookml_changes`, `rollback_to_production`, `provision_user`, `grant_access`, `offboard_user`, `rotate_api_credentials`, `audit_query_activity`, `audit_instance_health`, `investigate_runaway_queries`, `find_stale_content`, `disable_stale_sessions` | Task-oriented Layer 2 compositions — provisioning workflows (bootstrap, deploy, provision users) plus ops/audit workflows (offboard, rotate credentials, audit, cleanup) |
 
 ### Selecting Groups
 

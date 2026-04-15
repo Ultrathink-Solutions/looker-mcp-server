@@ -1,6 +1,7 @@
 """Tests for workflows tool group — task-oriented compositions."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -10,6 +11,21 @@ from mcp.types import TextContent
 
 from looker_mcp_server.config import LookerConfig
 from looker_mcp_server.server import create_server
+
+
+def _iso_days_ago(days: int) -> str:
+    """Format a timestamp N days before now in Looker's ISO 8601 shape.
+
+    Using relative-to-now timestamps keeps the stale-session tests from
+    silently breaking as the calendar advances past the hard-coded dates
+    they originally used.
+    """
+    return (
+        (datetime.now(UTC) - timedelta(days=days))
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 @pytest.fixture
@@ -594,6 +610,590 @@ class TestGrantAccess:
             )
             assert "error" in payload
             assert "principal_type" in payload["error"]
+        finally:
+            await client.close()
+
+
+# ══ offboard_user ════════════════════════════════════════════════════
+
+
+class TestOffboardUser:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_terminates_sessions_revokes_keys_disables(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/sessions").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": 1001, "user_id": 42, "created_at": "2026-04-10T00:00:00Z"},
+                    {"id": 1002, "user_id": 7, "created_at": "2026-04-10T00:00:00Z"},
+                ],
+            )
+        )
+        terminated: list = []
+
+        def capture_terminate(request: httpx.Request) -> httpx.Response:
+            terminated.append(request.url.path)
+            return httpx.Response(204)
+
+        respx.delete(url__regex=rf"{API_URL}/sessions/\d+").mock(side_effect=capture_terminate)
+        respx.get(f"{API_URL}/users/42/credentials_api3").mock(
+            return_value=httpx.Response(200, json=[{"id": "99", "client_id": "abc"}])
+        )
+        respx.delete(f"{API_URL}/users/42/credentials_api3/99").mock(
+            return_value=httpx.Response(204)
+        )
+        respx.patch(f"{API_URL}/users/42").mock(
+            return_value=httpx.Response(200, json={"id": "42", "is_disabled": True})
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp, "offboard_user", {"user_id": "42", "deactivate_only": True}
+            )
+            assert payload["all_steps_ok"] is True
+            assert payload["deactivated"] is True
+            # Terminated the session belonging to user 42, not the other one.
+            assert len(terminated) == 1
+            assert "/sessions/1001" in terminated[0]
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_delete_mode_requires_explicit_flag(self, config):
+        """When deactivate_only=False, DELETE is used instead of PATCH."""
+        _mock_login_logout()
+        respx.get(f"{API_URL}/sessions").mock(return_value=httpx.Response(200, json=[]))
+        respx.get(f"{API_URL}/users/42/credentials_api3").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        delete_captured = {"called": False}
+
+        def capture_delete(request: httpx.Request) -> httpx.Response:
+            delete_captured["called"] = True
+            return httpx.Response(204)
+
+        respx.delete(f"{API_URL}/users/42").mock(side_effect=capture_delete)
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp, "offboard_user", {"user_id": "42", "deactivate_only": False}
+            )
+            assert payload["deleted"] is True
+            assert payload["deactivated"] is False
+            assert payload["requested_action"] == "delete"
+            assert delete_captured["called"] is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_deactivated_flag_reflects_outcome_not_request(self, config):
+        """If the disable PATCH fails, `deactivated` must be False even
+        though the caller requested deactivate_only=True. Previously the
+        response mirrored the input, making a failed offboard look
+        successful to callers who only checked `deactivated`."""
+        _mock_login_logout()
+        respx.get(f"{API_URL}/sessions").mock(return_value=httpx.Response(200, json=[]))
+        respx.get(f"{API_URL}/users/42/credentials_api3").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        # PATCH /users/42 fails — Looker 403.
+        respx.patch(f"{API_URL}/users/42").mock(
+            return_value=httpx.Response(403, json={"message": "not authorized"})
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp, "offboard_user", {"user_id": "42", "deactivate_only": True}
+            )
+            assert payload["all_steps_ok"] is False
+            # Critical: request was 'deactivate' but outcome was failure,
+            # so deactivated must be False (not True as before).
+            assert payload["requested_action"] == "deactivate"
+            assert payload["deactivated"] is False
+            assert payload["deleted"] is False
+            # The failing step is visible in the steps list.
+            failed = [s for s in payload["steps"] if not s.get("ok", True)]
+            assert len(failed) == 1
+            assert failed[0]["step"] == "disable_user"
+        finally:
+            await client.close()
+
+
+# ══ rotate_api_credentials ═══════════════════════════════════════════
+
+
+class TestRotateApiCredentials:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_create_only_when_no_previous_id(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/users/42/credentials_api3").mock(
+            return_value=httpx.Response(
+                201,
+                json={"id": "99", "client_id": "new", "client_secret": "ONCE-ONLY"},
+            )
+        )
+        # No delete mock — should not be called.
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(mcp, "rotate_api_credentials", {"user_id": "42"})
+            assert payload["rotated"] is True
+            assert payload["new_credentials"]["client_secret"] == "ONCE-ONLY"
+            assert payload["old_pair_deletion"] is None
+            # Verify no DELETE calls to credentials_api3/* happened.
+            del_calls = [
+                c
+                for c in respx.calls
+                if c.request.method == "DELETE" and "credentials_api3" in c.request.url.path
+            ]
+            assert del_calls == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_deletes_previous_when_id_provided(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/users/42/credentials_api3").mock(
+            return_value=httpx.Response(
+                201, json={"id": "99", "client_id": "new", "client_secret": "ONCE"}
+            )
+        )
+        respx.delete(f"{API_URL}/users/42/credentials_api3/old").mock(
+            return_value=httpx.Response(204)
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "rotate_api_credentials",
+                {"user_id": "42", "delete_previous_id": "old"},
+            )
+            assert payload["old_pair_deletion"]["ok"] is True
+            assert payload["old_pair_deletion"]["deleted_previous_id"] == "old"
+        finally:
+            await client.close()
+
+
+# ══ audit_query_activity (scope enum) ════════════════════════════════
+
+
+class TestAuditQueryActivity:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_errors_scope_filters_to_non_complete(self, config):
+        _mock_login_logout()
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "q1"})
+
+        respx.post(f"{API_URL}/queries").mock(side_effect=capture)
+        respx.get(f"{API_URL}/queries/q1/run/json").mock(return_value=httpx.Response(200, json=[]))
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            await _invoke_tool(mcp, "audit_query_activity", {"scope": "errors"})
+            assert captured["body"]["filters"]["history.status"] == "-complete"
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_by_user_scope_requires_user_email(self, config):
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(mcp, "audit_query_activity", {"scope": "by_user"})
+            assert "error" in payload
+            assert "user_email" in payload["error"]
+            # No POST /queries should have fired.
+            assert [c for c in respx.calls if c.request.url.path.endswith("/queries")] == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_unknown_scope(self, config):
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(mcp, "audit_query_activity", {"scope": "everything"})
+            assert "error" in payload
+            assert "scope" in payload["error"]
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_by_content_rejects_both_ids(self, config):
+        """Passing both dashboard_id and look_id would AND the filters
+        into an intersection that's always empty (a query can be from
+        one or the other, never both). Must reject with a clear error
+        rather than silently returning zero rows."""
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "audit_query_activity",
+                {"scope": "by_content", "dashboard_id": "d1", "look_id": "l1"},
+            )
+            assert "error" in payload
+            assert "exactly one" in payload["error"]
+            # No POST /queries should have fired.
+            assert [c for c in respx.calls if c.request.url.path.endswith("/queries")] == []
+        finally:
+            await client.close()
+
+
+# ══ audit_instance_health ════════════════════════════════════════════
+
+
+class TestAuditInstanceHealth:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_aggregates_three_sections(self, config):
+        _mock_login_logout()
+
+        # Each POST /queries returns a different query id so we can mock
+        # the run/json responses distinctly.
+        query_ids = iter(["pdt-q", "sched-q"])
+
+        def post_queries(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(201, json={"id": next(query_ids)})
+
+        respx.post(f"{API_URL}/queries").mock(side_effect=post_queries)
+        respx.get(f"{API_URL}/queries/pdt-q/run/json").mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"pdt_event_log.status_code": "error", "pdt_event_log.message": "x"}],
+            )
+        )
+        respx.get(f"{API_URL}/queries/sched-q/run/json").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        respx.get(f"{API_URL}/content_validation").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "total_errors": 2,
+                    "total_looks_validated": 50,
+                    "total_dashboards_validated": 10,
+                },
+            )
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(mcp, "audit_instance_health", {})
+            assert payload["healthy"] is False
+            assert payload["partial_failure"] is False
+            # 1 PDT-build sample + 0 schedule samples + 2 content_validation errors = 3
+            assert payload["sample_issue_count"] == 3
+            assert payload["sections"]["failed_pdt_builds"]["sample_count"] == 1
+            assert payload["sections"]["failed_pdt_builds"]["truncated"] is False
+            assert payload["sections"]["content_validation"]["total_errors"] == 2
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_section_error_flips_healthy_false(self, config):
+        """A section whose query errors out must force healthy=False and
+        partial_failure=True, so the caller can never mistake an
+        uninspectable instance for a healthy one."""
+        _mock_login_logout()
+
+        # PDT query errors; schedule query succeeds with zero failures;
+        # content_validation succeeds with zero errors. Under the old
+        # shape the tool reported healthy=True because the erroring
+        # section contributed 0 to the total. Fixed: section error
+        # flips healthy to False regardless.
+        respx.post(f"{API_URL}/queries").mock(
+            side_effect=[
+                httpx.Response(500, json={"message": "server error"}),
+                httpx.Response(201, json={"id": "sched-q"}),
+            ]
+        )
+        respx.get(f"{API_URL}/queries/sched-q/run/json").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        respx.get(f"{API_URL}/content_validation").mock(
+            return_value=httpx.Response(200, json={"total_errors": 0, "total_looks_validated": 50})
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(mcp, "audit_instance_health", {})
+            assert payload["healthy"] is False
+            assert payload["partial_failure"] is True
+            assert "error" in payload["sections"]["failed_pdt_builds"]
+        finally:
+            await client.close()
+
+
+# ══ investigate_runaway_queries ══════════════════════════════════════
+
+
+class TestInvestigateRunawayQueries:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_report_lists_above_threshold(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/running_queries").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"query_task_id": "a", "runtime": 400, "source": "dashboard"},
+                    {"query_task_id": "b", "runtime": 60, "source": "api"},
+                    {"query_task_id": "c", "runtime": 600, "source": "explore"},
+                ],
+            )
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "investigate_runaway_queries",
+                {"threshold_seconds": 300, "action": "report"},
+            )
+            assert payload["runaway_count"] == 2
+            task_ids = {r["query_task_id"] for r in payload["runaways"]}
+            assert task_ids == {"a", "c"}
+            # In report mode, no DELETE should fire.
+            assert payload["killed"] is None
+            assert [
+                c
+                for c in respx.calls
+                if c.request.method == "DELETE" and "running_queries" in c.request.url.path
+            ] == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_kill_terminates_each_runaway(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/running_queries").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"query_task_id": "a", "runtime": 400},
+                    {"query_task_id": "c", "runtime": 600},
+                ],
+            )
+        )
+        killed_paths: list = []
+
+        def capture_kill(request: httpx.Request) -> httpx.Response:
+            killed_paths.append(request.url.path)
+            return httpx.Response(204)
+
+        respx.delete(url__regex=rf"{API_URL}/running_queries/.+").mock(side_effect=capture_kill)
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "investigate_runaway_queries",
+                {"threshold_seconds": 100, "action": "kill"},
+            )
+            assert payload["runaway_count"] == 2
+            assert len(payload["killed"]) == 2
+            assert all(k["ok"] for k in payload["killed"])
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_non_positive_threshold(self, config):
+        """Critical safety property: a non-positive threshold would
+        match every running query. With action='kill' that's a
+        kill-all. Tool must reject before any /running_queries call."""
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "investigate_runaway_queries",
+                {"threshold_seconds": -1, "action": "kill"},
+            )
+            assert "error" in payload
+            assert "positive" in payload["error"]
+            # No GET /running_queries, no DELETE calls.
+            assert [c for c in respx.calls if "running_queries" in c.request.url.path] == []
+        finally:
+            await client.close()
+
+
+# ══ find_stale_content ═══════════════════════════════════════════════
+
+
+class TestFindStaleContent:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_scopes_content_type_and_sorts_oldest_first(self, config):
+        _mock_login_logout()
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "q1"})
+
+        respx.post(f"{API_URL}/queries").mock(side_effect=capture)
+        respx.get(f"{API_URL}/queries/q1/run/json").mock(return_value=httpx.Response(200, json=[]))
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "find_stale_content",
+                {"min_days_unused": 120, "content_type": "dashboard"},
+            )
+            assert captured["body"]["view"] == "content_usage"
+            assert captured["body"]["filters"]["content_usage.content_type"] == "dashboard"
+            assert captured["body"]["sorts"] == ["content_usage.last_accessed_date asc"]
+        finally:
+            await client.close()
+
+
+# ══ disable_stale_sessions ═══════════════════════════════════════════
+
+
+class TestDisableStaleSessions:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_report_lists_without_terminating(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/sessions").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    # ~200 days old — stale at the default 90d threshold.
+                    {"id": 1, "user_id": 7, "created_at": _iso_days_ago(200)},
+                    # Recent — within the threshold, must NOT be reported.
+                    {"id": 2, "user_id": 8, "created_at": _iso_days_ago(5)},
+                ],
+            )
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "disable_stale_sessions",
+                {"max_age_days": 90, "action": "report"},
+            )
+            assert payload["stale_count"] == 1
+            assert payload["stale_sessions"][0]["id"] == 1
+            # Report mode: no terminated list in response.
+            assert payload["terminated"] is None
+            # Safety: no DELETE calls.
+            assert [
+                c
+                for c in respx.calls
+                if c.request.method == "DELETE" and "/sessions/" in c.request.url.path
+            ] == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_terminate_kills_each_stale(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/sessions").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": 1, "created_at": _iso_days_ago(220)},
+                    {"id": 2, "created_at": _iso_days_ago(180)},
+                    {"id": 3, "created_at": _iso_days_ago(5)},  # recent
+                ],
+            )
+        )
+        respx.delete(url__regex=rf"{API_URL}/sessions/\d+").mock(return_value=httpx.Response(204))
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "disable_stale_sessions",
+                {"max_age_days": 90, "action": "terminate"},
+            )
+            assert payload["stale_count"] == 2
+            assert len(payload["terminated"]) == 2
+            assert all(t["ok"] for t in payload["terminated"])
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_negative_max_age(self, config):
+        """Critical safety property: a negative max_age_days pushes the
+        cutoff into the future, which would make every session 'older'
+        than the cutoff. With action='terminate' that's a log-everyone-out.
+        Tool must reject before any /sessions call."""
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "disable_stale_sessions",
+                {"max_age_days": -1, "action": "terminate"},
+            )
+            assert "error" in payload
+            assert "non-negative" in payload["error"]
+            # No GET /sessions happened — tool failed fast on the guard.
+            assert [c for c in respx.calls if "/sessions" in c.request.url.path] == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_skips_timezone_naive_timestamps(self, config):
+        """Looker can return timestamps without a timezone designator;
+        datetime.fromisoformat returns a naive datetime, which would raise
+        TypeError on comparison with the UTC-aware cutoff and crash the
+        loop. Must skip naive rows gracefully rather than fail the call."""
+        _mock_login_logout()
+        # Mix a clearly-stale Z-suffixed row with a naive row and a
+        # recent row. The naive row must be skipped, not tank the call.
+        respx.get(f"{API_URL}/sessions").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": 1, "created_at": _iso_days_ago(200)},
+                    # Naive timestamp — no Z, no offset.
+                    {"id": 2, "created_at": "2025-01-01T00:00:00"},
+                    {"id": 3, "created_at": _iso_days_ago(5)},
+                ],
+            )
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "disable_stale_sessions",
+                {"max_age_days": 90, "action": "report"},
+            )
+            # Only the Z-suffixed 200-day-old row is flagged stale.
+            # The naive row was skipped; the recent row is inside the window.
+            assert payload["stale_count"] == 1
+            assert payload["stale_sessions"][0]["id"] == 1
         finally:
             await client.close()
 
