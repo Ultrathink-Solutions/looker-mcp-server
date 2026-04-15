@@ -23,6 +23,7 @@ ALL_GROUPS = frozenset(
         "connection",
         "user_attributes",
         "credentials",
+        "audit",
         "health",
     }
 )

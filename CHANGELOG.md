@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-04-15
+
+### Added
+
+- **audit** tool group (13 tools): observability surface covering query history, content usage, PDT/schedule logs, event audit, and live-ops triage.
+  - `system__activity` wrappers (5): `get_query_history`, `get_content_usage`, `get_pdt_build_log`, `get_schedule_history`, `get_user_activity_log`. Each composes the right explore + field set + filters over Looker's built-in audit model so callers don't have to know the schema; custom queries can still use the generic `query` tool.
+  - Live-ops (8): `list_running_queries` + `kill_query` for active-query triage, `list_active_sessions` + `get_session` + `terminate_session` for session audit and offboarding, and `list_project_ci_runs` + `get_project_ci_run` + `trigger_project_ci_run` for LookML CI visibility.
+- Total tool count: 127 → 140 across 14 groups
+
 ## [0.8.0] - 2026-04-15
 
 ### Added
@@ -141,6 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.9.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.6.0...v0.7.0
 [0.5.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.4.0...v0.5.0
