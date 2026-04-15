@@ -9,7 +9,8 @@ tool group.
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastmcp import FastMCP
 
@@ -148,6 +149,229 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
+            "Get full configuration for a single LookML project, including git "
+            "remote settings, validation policy, and release management flags. "
+            "For a trimmed summary across all projects, use ``list_projects``."
+        ),
+    )
+    async def get_project(
+        project_id: Annotated[str, "LookML project ID"],
+    ) -> str:
+        ctx = client.build_context("get_project", "modeling", {"project_id": project_id})
+        try:
+            async with client.session(ctx) as session:
+                project = await session.get(f"/projects/{quote(project_id, safe='')}")
+                return json.dumps(project, indent=2)
+        except Exception as e:
+            return format_api_error("get_project", e)
+
+    @server.tool(
+        description=(
+            "Create a new LookML project. The project starts with no git remote "
+            "configured — call ``update_project`` to set ``git_remote_url`` and "
+            "``create_project_deploy_key`` to generate a key that can be added "
+            "as a deploy key on the git remote."
+        ),
+    )
+    async def create_project(
+        name: Annotated[str, "Project name (becomes the ID)"],
+    ) -> str:
+        ctx = client.build_context("create_project", "modeling", {"name": name})
+        try:
+            async with client.session(ctx) as session:
+                project = await session.post("/projects", body={"name": name})
+                return json.dumps(
+                    {
+                        "id": project.get("id") if project else name,
+                        "name": project.get("name") if project else name,
+                        "created": True,
+                        "next_step": (
+                            "Call update_project to configure the git remote, "
+                            "then create_project_deploy_key if using deploy-key auth."
+                        ),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("create_project", e)
+
+    @server.tool(
+        description=(
+            "Update a LookML project's configuration. Primary use is to "
+            "connect a project to a git remote (set ``git_remote_url``, "
+            "``git_service_name``, and either ``git_username`` with a deploy key "
+            "or ``git_username_user_attribute`` for per-developer auth). Only "
+            "fields you supply are modified; omitted fields are preserved."
+        ),
+    )
+    async def update_project(
+        project_id: Annotated[str, "LookML project ID"],
+        name: Annotated[str | None, "New display name"] = None,
+        git_remote_url: Annotated[str | None, "Git remote URL"] = None,
+        git_username: Annotated[
+            str | None, "Git username (use with deploy-key or basic auth)"
+        ] = None,
+        git_password: Annotated[str | None, "Git password (write-only)"] = None,
+        git_service_name: Annotated[
+            str | None,
+            "Git service identifier, e.g. 'github', 'gitlab', 'bitbucket', 'custom'",
+        ] = None,
+        git_username_user_attribute: Annotated[
+            str | None, "User attribute holding each developer's git username"
+        ] = None,
+        git_password_user_attribute: Annotated[
+            str | None, "User attribute holding each developer's git password or token"
+        ] = None,
+        git_production_branch_name: Annotated[str | None, "Production branch name"] = None,
+        pull_request_mode: Annotated[
+            str | None, "'off', 'links', 'recommended', or 'required'"
+        ] = None,
+        validation_required: Annotated[
+            bool | None, "Require LookML validation before deploy"
+        ] = None,
+        git_release_mgmt_enabled: Annotated[bool | None, "Enable Looker release management"] = None,
+        allow_warnings: Annotated[
+            bool | None, "Allow deploys even when LookML warnings are present"
+        ] = None,
+    ) -> str:
+        ctx = client.build_context("update_project", "modeling", {"project_id": project_id})
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {}
+                _set_if(body, "name", name)
+                _set_if(body, "git_remote_url", git_remote_url)
+                _set_if(body, "git_username", git_username)
+                _set_if(body, "git_password", git_password)
+                _set_if(body, "git_service_name", git_service_name)
+                _set_if(body, "git_username_user_attribute", git_username_user_attribute)
+                _set_if(body, "git_password_user_attribute", git_password_user_attribute)
+                _set_if(body, "git_production_branch_name", git_production_branch_name)
+                _set_if(body, "pull_request_mode", pull_request_mode)
+                _set_if(body, "validation_required", validation_required)
+                _set_if(body, "git_release_mgmt_enabled", git_release_mgmt_enabled)
+                _set_if(body, "allow_warnings", allow_warnings)
+
+                if not body:
+                    return json.dumps(
+                        {
+                            "error": "No fields provided to update.",
+                            "hint": (
+                                "Pass at least one of: name, git_remote_url, git_username, "
+                                "git_password, git_service_name, git_username_user_attribute, "
+                                "git_password_user_attribute, git_production_branch_name, "
+                                "pull_request_mode, validation_required, "
+                                "git_release_mgmt_enabled, allow_warnings."
+                            ),
+                        },
+                        indent=2,
+                    )
+
+                project = await session.patch(f"/projects/{quote(project_id, safe='')}", body=body)
+                return json.dumps(
+                    {
+                        "id": project.get("id") if project else project_id,
+                        "updated": True,
+                        "fields_changed": sorted(body.keys()),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_project", e)
+
+    @server.tool(
+        description=(
+            "Delete a LookML project. Any models that live in this project will "
+            "stop working. This action cannot be undone."
+        ),
+    )
+    async def delete_project(
+        project_id: Annotated[str, "LookML project ID"],
+    ) -> str:
+        ctx = client.build_context("delete_project", "modeling", {"project_id": project_id})
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(f"/projects/{quote(project_id, safe='')}")
+                return json.dumps({"deleted": True, "project_id": project_id}, indent=2)
+        except Exception as e:
+            return format_api_error("delete_project", e)
+
+    @server.tool(
+        description=(
+            "Read the parsed LookML manifest for a project, which declares the "
+            "project's name, any LookML projects it depends on via ``local_dependency`` "
+            "or ``remote_dependency``, and which database connections it references. "
+            "Useful for auditing project dependencies before a change."
+        ),
+    )
+    async def get_project_manifest(
+        project_id: Annotated[str, "LookML project ID"],
+    ) -> str:
+        ctx = client.build_context("get_project_manifest", "modeling", {"project_id": project_id})
+        try:
+            async with client.session(ctx) as session:
+                manifest = await session.get(f"/projects/{quote(project_id, safe='')}/manifest")
+                return json.dumps(manifest, indent=2)
+        except Exception as e:
+            return format_api_error("get_project_manifest", e)
+
+    @server.tool(
+        description=(
+            "Read the existing SSH deploy key for a project (the public key that "
+            "must be installed on the git remote as a deploy key for git operations "
+            "to work). Returns 404 if no deploy key has been generated yet — call "
+            "``create_project_deploy_key`` to generate one."
+        ),
+    )
+    async def get_project_deploy_key(
+        project_id: Annotated[str, "LookML project ID"],
+    ) -> str:
+        ctx = client.build_context("get_project_deploy_key", "modeling", {"project_id": project_id})
+        try:
+            async with client.session(ctx) as session:
+                # Looker returns the public key as a raw string, not JSON.
+                key = await session.get(f"/projects/{quote(project_id, safe='')}/git/deploy_key")
+                return json.dumps(
+                    {"project_id": project_id, "public_key": key},
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("get_project_deploy_key", e)
+
+    @server.tool(
+        description=(
+            "Generate a new SSH deploy key for a project and return its public "
+            "key. Install the public key on the git remote (e.g. as a GitHub "
+            "deploy key with write access) before the project can push to the "
+            "remote. Calling this rotates any existing deploy key."
+        ),
+    )
+    async def create_project_deploy_key(
+        project_id: Annotated[str, "LookML project ID"],
+    ) -> str:
+        ctx = client.build_context(
+            "create_project_deploy_key", "modeling", {"project_id": project_id}
+        )
+        try:
+            async with client.session(ctx) as session:
+                key = await session.post(f"/projects/{quote(project_id, safe='')}/git/deploy_key")
+                return json.dumps(
+                    {
+                        "project_id": project_id,
+                        "public_key": key,
+                        "created": True,
+                        "next_step": (
+                            "Install this public key as a deploy key on the git "
+                            "remote (with write access) before git push operations "
+                            "will succeed."
+                        ),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("create_project_deploy_key", e)
+
+    @server.tool(
+        description=(
             "Validate LookML syntax and semantics for a project. "
             "Returns any errors or warnings found."
         ),
@@ -189,3 +413,13 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("validate_project", e)
+
+
+def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
+    """Add ``key`` to ``body`` only when ``value`` is not ``None``.
+
+    Keeps tool signatures flat (optional ``| None`` args) without forwarding
+    explicit ``None`` values that Looker would interpret as "clear this field".
+    """
+    if value is not None:
+        body[key] = value
