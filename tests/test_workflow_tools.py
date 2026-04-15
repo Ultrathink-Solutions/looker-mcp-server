@@ -835,6 +835,28 @@ class TestAuditQueryActivity:
         finally:
             await client.close()
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_by_content_rejects_both_ids(self, config):
+        """Passing both dashboard_id and look_id would AND the filters
+        into an intersection that's always empty (a query can be from
+        one or the other, never both). Must reject with a clear error
+        rather than silently returning zero rows."""
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "audit_query_activity",
+                {"scope": "by_content", "dashboard_id": "d1", "look_id": "l1"},
+            )
+            assert "error" in payload
+            assert "exactly one" in payload["error"]
+            # No POST /queries should have fired.
+            assert [c for c in respx.calls if c.request.url.path.endswith("/queries")] == []
+        finally:
+            await client.close()
+
 
 # ══ audit_instance_health ════════════════════════════════════════════
 
@@ -995,6 +1017,27 @@ class TestInvestigateRunawayQueries:
         finally:
             await client.close()
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_non_positive_threshold(self, config):
+        """Critical safety property: a non-positive threshold would
+        match every running query. With action='kill' that's a
+        kill-all. Tool must reject before any /running_queries call."""
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "investigate_runaway_queries",
+                {"threshold_seconds": -1, "action": "kill"},
+            )
+            assert "error" in payload
+            assert "positive" in payload["error"]
+            # No GET /running_queries, no DELETE calls.
+            assert [c for c in respx.calls if "running_queries" in c.request.url.path] == []
+        finally:
+            await client.close()
+
 
 # ══ find_stale_content ═══════════════════════════════════════════════
 
@@ -1093,6 +1136,64 @@ class TestDisableStaleSessions:
             assert payload["stale_count"] == 2
             assert len(payload["terminated"]) == 2
             assert all(t["ok"] for t in payload["terminated"])
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_negative_max_age(self, config):
+        """Critical safety property: a negative max_age_days pushes the
+        cutoff into the future, which would make every session 'older'
+        than the cutoff. With action='terminate' that's a log-everyone-out.
+        Tool must reject before any /sessions call."""
+        _mock_login_logout()
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "disable_stale_sessions",
+                {"max_age_days": -1, "action": "terminate"},
+            )
+            assert "error" in payload
+            assert "non-negative" in payload["error"]
+            # No GET /sessions happened — tool failed fast on the guard.
+            assert [c for c in respx.calls if "/sessions" in c.request.url.path] == []
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_skips_timezone_naive_timestamps(self, config):
+        """Looker can return timestamps without a timezone designator;
+        datetime.fromisoformat returns a naive datetime, which would raise
+        TypeError on comparison with the UTC-aware cutoff and crash the
+        loop. Must skip naive rows gracefully rather than fail the call."""
+        _mock_login_logout()
+        # Mix a clearly-stale Z-suffixed row with a naive row and a
+        # recent row. The naive row must be skipped, not tank the call.
+        respx.get(f"{API_URL}/sessions").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": 1, "created_at": _iso_days_ago(200)},
+                    # Naive timestamp — no Z, no offset.
+                    {"id": 2, "created_at": "2025-01-01T00:00:00"},
+                    {"id": 3, "created_at": _iso_days_ago(5)},
+                ],
+            )
+        )
+
+        mcp, client = create_server(config, enabled_groups={"workflows"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "disable_stale_sessions",
+                {"max_age_days": 90, "action": "report"},
+            )
+            # Only the Z-suffixed 200-day-old row is flagged stale.
+            # The naive row was skipped; the recent row is inside the window.
+            assert payload["stale_count"] == 1
+            assert payload["stale_sessions"][0]["id"] == 1
         finally:
             await client.close()
 

@@ -761,6 +761,19 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                 {"error": "scope='by_content' requires either dashboard_id or look_id"},
                 indent=2,
             )
+        # Passing both IDs would AND them into an intersection that
+        # matches zero rows in practice (a query can be from a dashboard
+        # OR a look, never both). Reject rather than silently return [].
+        if scope == "by_content" and dashboard_id and look_id:
+            return json.dumps(
+                {
+                    "error": (
+                        "scope='by_content' accepts exactly one of "
+                        "dashboard_id or look_id, not both"
+                    ),
+                },
+                indent=2,
+            )
 
         filters: dict[str, str] = {"history.created_time": date_range}
         sorts: list[str] = ["history.runtime desc"]
@@ -981,6 +994,16 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                 {"error": f"action must be 'report' or 'kill', got {action!r}"},
                 indent=2,
             )
+        # A non-positive threshold would match every running query — with
+        # action='kill' that's a kill-all. Reject before we get anywhere
+        # near the DELETE loop.
+        if threshold_seconds <= 0:
+            return json.dumps(
+                {
+                    "error": (f"threshold_seconds must be positive, got {threshold_seconds!r}"),
+                },
+                indent=2,
+            )
 
         ctx = client.build_context(
             "investigate_runaway_queries",
@@ -1118,6 +1141,16 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                 {"error": f"action must be 'report' or 'terminate', got {action!r}"},
                 indent=2,
             )
+        # Negative max_age_days pushes the cutoff into the future, which
+        # would mark every session as "older than" the cutoff — with
+        # action='terminate' that's a log-everyone-out. Reject early.
+        if max_age_days < 0:
+            return json.dumps(
+                {
+                    "error": (f"max_age_days must be non-negative, got {max_age_days!r}"),
+                },
+                indent=2,
+            )
 
         from datetime import datetime, timedelta
 
@@ -1140,6 +1173,13 @@ def register_workflow_tools(server: FastMCP, client: LookerClient) -> None:
                         created = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
                     except ValueError:
                         # Unparseable timestamp — skip rather than guess.
+                        continue
+                    # fromisoformat can return a naive datetime if the
+                    # input string has no timezone designator. Comparing
+                    # naive < aware raises TypeError, which would crash
+                    # the loop and tank the whole call. Skip naive rows
+                    # rather than assuming UTC.
+                    if created.tzinfo is None:
                         continue
                     if created < cutoff:
                         stale.append(
