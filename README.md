@@ -150,7 +150,11 @@ All settings are configured via environment variables with the `LOOKER_` prefix,
 | `LOOKER_MAX_ROWS` | `5000` | Default maximum rows for query tools |
 | `LOOKER_VERIFY_SSL` | `true` | Verify TLS certificates |
 | `LOOKER_LOG_LEVEL` | `INFO` | Logging level |
-| `LOOKER_MCP_AUTH_TOKEN` | | Static bearer token for MCP-level authentication |
+| `LOOKER_MCP_MODE` | `dev` | `dev` (permissive) or `public` (OAuth 2.1 resource-server, MCP 2025-11-25). See [MCP-Level Authentication](#mcp-level-authentication). |
+| `LOOKER_MCP_JWKS_URI` | | Authorization server JWK Set URL (RFC 7517). **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL. |
+| `LOOKER_MCP_ISSUER_URL` | | Expected `iss` claim (RFC 8414). **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL. |
+| `LOOKER_MCP_RESOURCE_URI` | | This server's canonical URI for RFC 8707 audience binding and the RFC 9728 PRM `resource` field. **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL without fragment. |
+| `LOOKER_MCP_AUTH_TOKEN` | | Static bearer token for MCP-level authentication. **Deprecated** — emits a warning in `dev` mode, rejected outright in `public` mode (RFC 9068 §2.1 forbids symmetric static bearers for OAuth 2.1 access tokens). Scheduled for removal in a future major release; migrate to `LOOKER_MCP_MODE=public`. |
 
 ## Authentication & Impersonation
 
@@ -252,13 +256,45 @@ The `RequestContext` provides:
 
 ## MCP-Level Authentication
 
-To protect the MCP server itself (who can connect to it), set a static bearer token:
+MCP-level authentication (who can connect to the server) has two modes, selected by `LOOKER_MCP_MODE`.
+
+### `LOOKER_MCP_MODE=dev` (default) — permissive
+
+Intended for local development, stdio deployments, and trust-network scenarios behind an upstream gateway. Two sub-options:
+
+1. **No MCP-level auth** (default) — any client that can reach the transport can connect.
+2. **Static bearer token** (deprecated) — set `LOOKER_MCP_AUTH_TOKEN` and clients must present it. Emits a `DeprecationWarning` at startup because RFC 9068 §2.1 forbids symmetric static bearers for OAuth 2.1 access tokens, and because static bearers don't carry per-user identity or expiry. Scheduled for removal in a future major release — migrate to `LOOKER_MCP_MODE=public`.
+
+### `LOOKER_MCP_MODE=public` — OAuth 2.1 resource-server (MCP 2025-11-25)
+
+Internet-exposed / compliance-gated deployments. The server:
+
+- Validates every request's `Authorization: Bearer <JWT>` header as an OAuth 2.1 access token.
+- Accepts only `RS256` and `ES256` signatures (RFC 9068 §2.1). HS256 is hard-rejected at header inspection to close the algorithm-confusion attack vector (CVE-2015-9235).
+- Caches the authorization server's JWKS (RFC 7517) with a 1-hour TTL and throttled kid-miss refresh (≤1 forced refresh per 5 minutes).
+- Enforces `iss` (RFC 8414) and `aud` (RFC 8707) claim binding.
+- Serves an RFC 9728 Protected Resource Metadata document for client auto-discovery. The spec-canonical URL follows RFC 9728 §3 construction: `/.well-known/oauth-protected-resource` when `LOOKER_MCP_RESOURCE_URI` is an origin-only identifier, or `/.well-known/oauth-protected-resource<resource-path>` when it carries a path. The origin-rooted path is also served as a defensive fallback.
+- Emits realm-bearing `WWW-Authenticate` challenges on 401 (RFC 7235 §4.1 + RFC 9728 §5.1) pointing clients at the PRM URL.
+- Rejects URL-query bearer tokens (`?access_token=`, `?authorization=`) with a 400 `invalid_request` per OAuth 2.1 §5.1.1 — URL-bound tokens leak into referrer headers, proxy logs, and browser history regardless of destination.
+- **Rejects `LOOKER_MCP_AUTH_TOKEN` outright** — if the static bearer env var is set alongside `LOOKER_MCP_MODE=public`, the server fails to start.
+
+Required configuration:
 
 ```bash
-export LOOKER_MCP_AUTH_TOKEN="your-secret-mcp-token"
+export LOOKER_MCP_MODE=public
+export LOOKER_MCP_JWKS_URI="https://auth.example.com/.well-known/jwks.json"
+export LOOKER_MCP_ISSUER_URL="https://auth.example.com"
+export LOOKER_MCP_RESOURCE_URI="https://looker-mcp.example.com/mcp"
 ```
 
-MCP clients must then include this token in their connection. This is separate from Looker API authentication.
+All three URIs must be absolute `https://` URLs; the server fails closed at startup with a typed `DeploymentPostureError` if any are missing, malformed, or use `http://`. The `LOOKER_MCP_RESOURCE_URI` must not carry a fragment (RFC 9728 §3).
+
+#### Deprecation timeline for `LOOKER_MCP_AUTH_TOKEN`
+
+- **This release (0.13.0)** — deprecated in `dev` mode (warning emitted), rejected in `public` mode (startup failure).
+- **Future major release** — removed entirely.
+
+If you currently rely on `LOOKER_MCP_AUTH_TOKEN` for gateway-level MCP protection, plan the migration now: either stand up an authorization server that issues OAuth 2.1 access tokens bound to `aud=<LOOKER_MCP_RESOURCE_URI>`, or keep the server in `dev` mode behind a trusted network perimeter.
 
 ## Health Endpoints
 
@@ -266,6 +302,7 @@ When running in HTTP mode, the server exposes:
 
 - `GET /healthz` — liveness probe (always returns 200 if server is running)
 - `GET /readyz` — readiness probe (verifies Looker connectivity with a login/logout cycle)
+- `GET /.well-known/oauth-protected-resource` — RFC 9728 Protected Resource Metadata (only when `LOOKER_MCP_MODE=public`). When `LOOKER_MCP_RESOURCE_URI` has a path, the same document is also served at `/.well-known/oauth-protected-resource<resource-path>` — that is the spec-canonical URL per RFC 9728 §3, and the one referenced by `resource_metadata=...` in 401 `WWW-Authenticate` challenges.
 
 ## Development
 

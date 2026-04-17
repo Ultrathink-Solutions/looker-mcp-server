@@ -21,6 +21,7 @@ resource servers against the same spec family.
 from __future__ import annotations
 
 from .jwks import ALLOWED_SIGNING_ALGORITHMS, JWKSCache, JWKSError
+from .middleware import PublicModeAuthMiddleware
 from .prm import ProtectedResourceMetadata, build_prm_document
 from .resource_server import (
     OAuth21ResourceServer,
@@ -39,6 +40,7 @@ __all__ = [
     "JWKSError",
     "OAuth21ResourceServer",
     "ProtectedResourceMetadata",
+    "PublicModeAuthMiddleware",
     "TokenVerificationError",
     "VerifiedClaims",
     "build_prm_document",
