@@ -19,7 +19,7 @@ import jwt as pyjwt
 import pytest
 import respx
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from looker_mcp_server.oidc import (
     JWKSCache,
@@ -60,11 +60,34 @@ def rsa_keypair():
     }
 
 
+@pytest.fixture(scope="module")
+def ec_keypair():
+    """P-256 EC keypair for ES256 signing — parity with ``rsa_keypair``."""
+    private = ec.generate_private_key(ec.SECP256R1())
+    private_pem = private.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+    return {
+        "private_pem": private_pem,
+        "public_key": private.public_key(),
+    }
+
+
 def _make_jwks(public_key, kid: str = "test-kid-1") -> dict:
     from jwt.algorithms import RSAAlgorithm
 
     jwk = RSAAlgorithm.to_jwk(public_key, as_dict=True)
     jwk.update({"kid": kid, "use": "sig", "alg": "RS256"})
+    return {"keys": [jwk]}
+
+
+def _make_ec_jwks(public_key, kid: str = "test-kid-es256") -> dict:
+    from jwt.algorithms import ECAlgorithm
+
+    jwk = ECAlgorithm.to_jwk(public_key, as_dict=True)
+    jwk.update({"kid": kid, "use": "sig", "alg": "ES256"})
     return {"keys": [jwk]}
 
 
@@ -389,6 +412,34 @@ class TestOAuth21ResourceServer:
         assert verified.sub == "user-1"
         assert verified.kid == "test-kid-1"
         assert verified.alg == "RS256"
+        assert verified.scopes == ["looker:read"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_happy_path_es256(self, ec_keypair):
+        """ES256 is the second algorithm advertised in the PRM and in
+        ``ALLOWED_SIGNING_ALGORITHMS``; this test pins the happy-path
+        verify so a regression in EC key handling (JWK import or jose
+        selection) gets caught alongside the RS256 path."""
+        cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
+        respx.get(cache.jwks_uri).mock(
+            return_value=httpx.Response(200, json=_make_ec_jwks(ec_keypair["public_key"]))
+        )
+        validator = OAuth21ResourceServer(
+            cache,
+            issuer="https://as.example.com",
+            audience="https://looker.example.com/mcp",
+        )
+        token = _mint(
+            private_pem=ec_keypair["private_pem"],
+            kid="test-kid-es256",
+            alg="ES256",
+        )
+
+        verified = await validator.verify(token)
+        assert verified.sub == "user-1"
+        assert verified.kid == "test-kid-es256"
+        assert verified.alg == "ES256"
         assert verified.scopes == ["looker:read"]
 
     @pytest.mark.asyncio

@@ -255,8 +255,33 @@ class LookerConfig(BaseSettings):
 
     @field_validator("mcp_resource_uri")
     @classmethod
-    def _strip_resource_uri_trailing_slash(cls, v: str) -> str:
-        return v.rstrip("/")
+    def _normalize_resource_uri(cls, v: str) -> str:
+        """Strip surrounding whitespace first, then drop a trailing slash.
+
+        Ordering matters: if an operator exports ``LOOKER_MCP_RESOURCE_URI=
+        " https://looker.example.com/mcp/ "``, the stored value must be
+        ``https://looker.example.com/mcp`` — whitespace removed, and no
+        trailing slash (RFC 8707 §2 audience binding is an exact-string
+        match; an extra slash silently breaks every token). A
+        whitespace-only input round-trips to the empty string, which the
+        public-mode posture validator then rejects with the standard
+        missing-resource-uri error.
+        """
+        return v.strip().rstrip("/")
+
+    @field_validator("mcp_jwks_uri", "mcp_issuer_url")
+    @classmethod
+    def _strip_uri_whitespace(cls, v: str) -> str:
+        """Strip surrounding whitespace on the JWKS URI + issuer URL.
+
+        Parity with ``mcp_resource_uri``: a trailing space in either
+        value would silently break downstream consumers (httpx rejects
+        URLs with whitespace; PyJWT's ``iss`` check is an exact-string
+        match). Normalizing here — at the field-validator stage — makes
+        the guarantee mode-independent, so even ``dev`` mode carries
+        cleanly-trimmed values into the runtime.
+        """
+        return v.strip()
 
     @model_validator(mode="after")
     def _deprecation_warn_static_bearer_in_dev(self) -> Self:
@@ -303,8 +328,10 @@ class LookerConfig(BaseSettings):
                 "or switch to LOOKER_MCP_MODE=dev for local iteration.",
             )
 
-        jwks_uri = (self.mcp_jwks_uri or "").strip()
-        if not jwks_uri or not _is_absolute_https_url(jwks_uri):
+        # Field validators (_strip_uri_whitespace) already normalized
+        # surrounding whitespace on mcp_jwks_uri / mcp_issuer_url, so the
+        # stored attributes ARE the canonical value we validate against.
+        if not self.mcp_jwks_uri or not _is_absolute_https_url(self.mcp_jwks_uri):
             raise DeploymentPostureError(
                 PostureErrorKind.PUBLIC_MISSING_JWKS_URI,
                 "LOOKER_MCP_MODE=public requires LOOKER_MCP_JWKS_URI to be a "
@@ -312,22 +339,14 @@ class LookerConfig(BaseSettings):
                 "of the authorization server that issues access tokens for this "
                 f"resource. Got {self.mcp_jwks_uri!r}.",
             )
-        # Persist the trimmed value back so JWKSCache doesn't fetch a URL
-        # with surrounding whitespace (which httpx would reject / error on).
-        self.mcp_jwks_uri = jwks_uri
 
-        issuer_url = (self.mcp_issuer_url or "").strip()
-        if not issuer_url or not _is_absolute_https_url(issuer_url):
+        if not self.mcp_issuer_url or not _is_absolute_https_url(self.mcp_issuer_url):
             raise DeploymentPostureError(
                 PostureErrorKind.PUBLIC_MISSING_ISSUER_URL,
                 "LOOKER_MCP_MODE=public requires LOOKER_MCP_ISSUER_URL to be a "
                 "non-empty absolute https URL — the expected JWT `iss` claim "
                 f"(RFC 8414). Got {self.mcp_issuer_url!r}.",
             )
-        # Same rationale as mcp_jwks_uri above: the iss comparison in
-        # PyJWT is an exact-string match, so trailing whitespace in the
-        # configured issuer would silently break token validation.
-        self.mcp_issuer_url = issuer_url
 
         if not self.mcp_resource_uri:
             raise DeploymentPostureError(

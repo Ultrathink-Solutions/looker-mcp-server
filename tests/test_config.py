@@ -297,6 +297,24 @@ class TestMcpModePosture:
         assert config.mcp_jwks_uri == "https://as.example.com/.well-known/jwks.json"
         assert config.mcp_issuer_url == "https://as.example.com"
 
+    def test_resource_uri_trims_whitespace_and_trailing_slash(self):
+        """Resource URI normalization applies in every mode (not just
+        public), since dev-mode deployments also compare the audience
+        claim downstream. Field validator runs before the mode-specific
+        posture check, so whitespace + trailing slash both disappear."""
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+                LOOKER_MCP_RESOURCE_URI=" https://looker.example.com/mcp/ ",
+            ),
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_resource_uri == "https://looker.example.com/mcp"
+
     def test_public_mode_requires_resource_uri(self):
         from pydantic import ValidationError
 
