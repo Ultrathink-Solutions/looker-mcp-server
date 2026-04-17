@@ -20,7 +20,7 @@ import structlog
 
 from .config import ALL_GROUPS, DEFAULT_GROUPS, LookerConfig
 from .middleware import HeaderCaptureMiddleware
-from .server import create_server, parse_groups
+from .server import build_public_mode_middleware, create_server, parse_groups
 
 logger = structlog.get_logger()
 
@@ -103,7 +103,17 @@ async def run(config: LookerConfig, groups: set[str]) -> None:
         kwargs["transport"] = "streamable-http"
         kwargs["host"] = config.host
         kwargs["port"] = config.port
-        kwargs["middleware"] = [Middleware(HeaderCaptureMiddleware)]
+        # Composition order matters: PublicModeAuthMiddleware (when
+        # present) runs FIRST so unauthenticated requests are rejected
+        # before HeaderCaptureMiddleware copies anything into the
+        # request-scoped ContextVar. In dev mode the returned value is
+        # None and the chain is just [HeaderCaptureMiddleware] as before.
+        middleware: list[Middleware] = []
+        public_auth = build_public_mode_middleware(config)
+        if public_auth is not None:
+            middleware.append(public_auth)
+        middleware.append(Middleware(HeaderCaptureMiddleware))
+        kwargs["middleware"] = middleware
     else:
         kwargs["transport"] = "stdio"
 
