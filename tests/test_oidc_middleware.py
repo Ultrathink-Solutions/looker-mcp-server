@@ -115,6 +115,7 @@ class TestPublicModeAuthMiddleware:
             prm_url="https://looker.example.com/.well-known/oauth-protected-resource",
         )
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_valid_token_passes_through(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
@@ -127,6 +128,7 @@ class TestPublicModeAuthMiddleware:
         assert status == 200
         assert json.loads(body) == {"authenticated_sub": "user-1"}
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_missing_authorization_401_with_challenge(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
@@ -141,12 +143,14 @@ class TestPublicModeAuthMiddleware:
         )
         assert json.loads(body)["error"] == "invalid_token"
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_malformed_bearer_prefix_401(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
         status, _, _ = await _drive(mw, headers={"Authorization": "Basic abcd"})
         assert status == 401
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_invalid_token_401(self, rsa_keypair):
         """Token signed with a foreign key fails signature verification."""
@@ -166,6 +170,7 @@ class TestPublicModeAuthMiddleware:
         assert status == 401
         assert json.loads(body)["error"] == "invalid_token"
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_bearer_in_query_rejected_with_400(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
@@ -176,12 +181,14 @@ class TestPublicModeAuthMiddleware:
         assert parsed["error"] == "invalid_request"
         assert "OAuth 2.1" in parsed["error_description"]
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_authorization_query_param_also_rejected(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
         status, _, _ = await _drive(mw, query_string=b"authorization=Bearer+abc")
         assert status == 400
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_benign_query_value_containing_access_token_is_allowed(self, rsa_keypair):
         """Regression: the earlier substring-match implementation would
@@ -201,24 +208,28 @@ class TestPublicModeAuthMiddleware:
         )
         assert status == 200, "value-side occurrence of 'access_token' must not trigger rejection"
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_well_known_path_bypasses_auth(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
         status, _, _ = await _drive(mw, path="/.well-known/oauth-protected-resource")
         assert status == 200
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_healthz_bypasses_auth(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
         status, _, _ = await _drive(mw, path="/healthz")
         assert status == 200
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_readyz_bypasses_auth(self, rsa_keypair):
         mw = self._mw(_build_resource_server(rsa_keypair))
         status, _, _ = await _drive(mw, path="/readyz")
         assert status == 200
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_healthz_prefix_lookalike_does_not_bypass(self, rsa_keypair):
         """Regression: the earlier ``path.startswith(p)`` check would
@@ -229,6 +240,7 @@ class TestPublicModeAuthMiddleware:
         status, _, _ = await _drive(mw, path="/healthzfoo")
         assert status == 401, "lookalike path must not bypass token validation"
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_well_known_path_with_bearer_in_query_still_rejected(self, rsa_keypair):
         """Bearer-in-query is a protocol violation regardless of path — URL
@@ -241,6 +253,7 @@ class TestPublicModeAuthMiddleware:
         )
         assert status == 400
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_empty_realm_rejected_at_construct(self, rsa_keypair):
         rs = _build_resource_server(rsa_keypair)
@@ -252,6 +265,7 @@ class TestPublicModeAuthMiddleware:
                 prm_url="https://x.example/md",
             )
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_websocket_scope_passes_through(self, rsa_keypair):
         """Non-HTTP scopes (websocket, lifespan) pass through untouched.

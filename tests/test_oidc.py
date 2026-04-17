@@ -211,6 +211,7 @@ class TestJWKSCache:
         with pytest.raises(ValueError, match="jwks_uri"):
             JWKSCache("")
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_happy_path_caches_and_returns_key(self, rsa_keypair):
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
@@ -225,6 +226,7 @@ class TestJWKSCache:
         await cache.get_key("test-kid-1")
         assert route.call_count == 1
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_unknown_kid_forces_one_refresh_then_raises(self, rsa_keypair):
         cache = JWKSCache(
@@ -242,6 +244,7 @@ class TestJWKSCache:
         # forced refresh (second fetch). Both fail to find the kid.
         assert route.call_count == 2
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_cold_start_failure_raises(self):
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
@@ -250,6 +253,7 @@ class TestJWKSCache:
         with pytest.raises(JWKSError, match="failed to fetch"):
             await cache.get_key("any-kid")
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_symmetric_keys_rejected_from_jwks(self):
         """A JWKS entry advertising HS256 is silently dropped (not used for
@@ -284,6 +288,7 @@ class TestOAuth21ResourceServer:
             audience="https://looker.example.com/mcp",
         )
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_happy_path_rs256(self, rsa_keypair):
         validator = self._make_validator(rsa_keypair)
@@ -295,6 +300,7 @@ class TestOAuth21ResourceServer:
         assert verified.alg == "RS256"
         assert verified.scopes == ["looker:read"]
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_hs256_token_rejected(self, rsa_keypair):
         """Even if an attacker mints an HS256 token with any secret, the
@@ -309,6 +315,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="unsupported or missing alg"):
             await validator.verify(attacker_token)
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_wrong_audience_rejected(self, rsa_keypair):
         validator = self._make_validator(rsa_keypair)
@@ -319,6 +326,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_wrong_issuer_rejected(self, rsa_keypair):
         validator = self._make_validator(rsa_keypair)
@@ -329,6 +337,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_expired_rejected(self, rsa_keypair):
         validator = self._make_validator(rsa_keypair)
@@ -336,6 +345,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_forged_with_different_key_rejected(self, rsa_keypair):
         """A token signed with an UNRELATED RSA key fails signature check
@@ -351,6 +361,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_missing_kid_header_rejected(self, rsa_keypair):
         validator = self._make_validator(rsa_keypair)
@@ -363,6 +374,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="missing kid"):
             await validator.verify(token)
 
+    @pytest.mark.asyncio
     @respx.mock
     async def test_empty_token_rejected(self, rsa_keypair):
         validator = self._make_validator(rsa_keypair)
