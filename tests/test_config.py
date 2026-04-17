@@ -109,3 +109,222 @@ class TestGroupConstants:
         assert "admin" not in DEFAULT_GROUPS
         assert "git" not in DEFAULT_GROUPS
         assert "modeling" not in DEFAULT_GROUPS
+
+
+class TestMcpModePosture:
+    """Tests for the MCP deployment-posture system — ``LOOKER_MCP_MODE`` enum
+    plus ``public``-mode validation that enforces MCP 2025-11-25 MUSTs.
+
+    ``DeploymentPostureError`` is a ``ValueError`` subclass raised inside a
+    ``model_validator(mode="after")``, which Pydantic wraps in a
+    ``ValidationError``.  We assert on the wrapped error's message (carries
+    the posture-kind tag) and on ``ctx["error"]`` (which preserves the
+    original typed exception object — useful for operator tooling).
+    """
+
+    def _env(self, **overrides: str) -> dict[str, str]:
+        base = {"LOOKER_BASE_URL": "https://example.looker.com"}
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _extract_posture_kind(exc_info):
+        """Pull the :class:`PostureErrorKind` out of a Pydantic ValidationError.
+
+        Pydantic wraps a ``ValueError`` raised inside a ``@model_validator``
+        such that the original exception is accessible via
+        ``exc.errors()[0]["ctx"]["error"]``.
+        """
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import DeploymentPostureError
+
+        err = exc_info.value
+        assert isinstance(err, ValidationError), f"expected ValidationError, got {type(err)}"
+        details = err.errors()
+        assert len(details) == 1
+        ctx = details[0].get("ctx", {})
+        inner = ctx.get("error")
+        assert isinstance(inner, DeploymentPostureError), (
+            f"expected DeploymentPostureError inside ctx, got {type(inner)}"
+        )
+        return inner.kind
+
+    def test_default_mode_is_dev(self):
+        from looker_mcp_server.config import LookerMcpMode
+
+        with patch.dict(os.environ, self._env(), clear=True):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_mode == LookerMcpMode.DEV
+
+    def test_dev_mode_permissive_without_oidc(self):
+        """``dev`` mode does not require OIDC fields — local iteration works."""
+        with patch.dict(os.environ, self._env(LOOKER_MCP_MODE="dev"), clear=True):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_jwks_uri == ""
+        assert config.mcp_issuer_url == ""
+
+    def test_dev_mode_accepts_static_bearer_with_deprecation_warning(self):
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="dev",
+                LOOKER_MCP_AUTH_TOKEN="dev-bearer-secret",
+            ),
+            clear=True,
+        ):
+            with pytest.warns(DeprecationWarning, match="LOOKER_MCP_AUTH_TOKEN"):
+                config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_auth_token == "dev-bearer-secret"
+
+    def test_public_mode_rejects_static_bearer(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_AUTH_TOKEN="any-value",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+                LOOKER_MCP_RESOURCE_URI="https://looker.example.com/mcp",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_STATIC_BEARER_FORBIDDEN
+
+    def test_public_mode_requires_jwks_uri(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(LOOKER_MCP_MODE="public"),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_JWKS_URI
+
+    def test_public_mode_requires_issuer_url(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_ISSUER_URL
+
+    def test_public_mode_requires_resource_uri(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_RESOURCE_URI
+
+    def test_public_mode_rejects_http_resource_uri(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+                LOOKER_MCP_RESOURCE_URI="http://looker.example.com/mcp",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_RESOURCE_URI_NOT_HTTPS
+
+    def test_public_mode_rejects_resource_uri_with_fragment(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+                LOOKER_MCP_RESOURCE_URI="https://looker.example.com/mcp#frag",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_RESOURCE_URI_MALFORMED
+
+    def test_public_mode_strips_resource_uri_trailing_slash(self):
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+                LOOKER_MCP_RESOURCE_URI="https://looker.example.com/mcp/",
+            ),
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_resource_uri == "https://looker.example.com/mcp"
+
+    def test_public_mode_happy_path(self):
+        """All required env set + https resource URI → config resolves cleanly."""
+        from looker_mcp_server.config import LookerMcpMode
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL="https://as.example.com",
+                LOOKER_MCP_RESOURCE_URI="https://looker.example.com/mcp",
+            ),
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_mode == LookerMcpMode.PUBLIC
+        assert config.mcp_jwks_uri.startswith("https://")
+        assert config.mcp_resource_uri == "https://looker.example.com/mcp"
+
+    def test_posture_error_carries_kind_and_message(self):
+        from looker_mcp_server.config import DeploymentPostureError, PostureErrorKind
+
+        err = DeploymentPostureError(
+            PostureErrorKind.PUBLIC_MISSING_JWKS_URI, "detail"
+        )
+        assert err.kind == PostureErrorKind.PUBLIC_MISSING_JWKS_URI
+        assert "public_missing_jwks_uri" in str(err)
+        assert "detail" in str(err)
+        # Backwards-compat with Pydantic validators expecting ValueError.
+        assert isinstance(err, ValueError)
