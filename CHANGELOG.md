@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-04-17
+
+### Added
+
+- **OAuth 2.1 resource-server mode for the MCP endpoint** (MCP 2025-11-25
+  authorization). Opt in by setting `LOOKER_MCP_MODE=public`; the server
+  then validates every request's `Authorization: Bearer <JWT>` header
+  against a configurable authorization server.
+  - `LOOKER_MCP_MODE` (`dev` / `public`, default `dev`): posture switch.
+    `dev` stays permissive for trust-network and local deployments;
+    `public` enables fail-closed startup validation and bearer-token
+    enforcement on every request.
+  - `LOOKER_MCP_JWKS_URI`, `LOOKER_MCP_ISSUER_URL`,
+    `LOOKER_MCP_RESOURCE_URI`: three new required-in-`public`-mode env
+    vars binding the JWK Set endpoint (RFC 7517), the expected `iss`
+    claim (RFC 8414), and this resource's canonical audience identifier
+    (RFC 8707) respectively. All three are validated as non-empty
+    absolute `https://` URIs at startup.
+- **RS256 / ES256 signature verification** against cached JWKS keys.
+  HS256 and other symmetric algorithms are hard-rejected at header
+  inspection (RFC 9068 §2.1 / CVE-2015-9235 — algorithm-confusion
+  defense). JWKS responses are filtered by both allowlist and JWK type
+  (`RS256` requires `kty=RSA`; `ES256` requires `kty=EC`; `kty=oct` is
+  unconditionally dropped).
+- **JWKS cache** (`looker_mcp_server.oidc.jwks.JWKSCache`) with a 1-hour
+  TTL, async-lock-serialized fetches, and a throttled kid-miss refresh
+  (≤1 forced refresh per 5 minutes) so a rotation event flows through
+  automatically without flooding the authorization server on brute-force
+  `kid` values. Transient post-cold-start failures (network, malformed
+  JSON, invalid payload shape, zero-usable-keys) preserve the existing
+  cache; only cold-start failures raise fail-closed.
+- **Protected Resource Metadata** (RFC 9728) served at
+  `/.well-known/oauth-protected-resource` and — when
+  `LOOKER_MCP_RESOURCE_URI` carries a path — additionally at the
+  RFC 9728 §3 suffix-variant location
+  `/.well-known/oauth-protected-resource<resource-path>`. The suffix
+  variant is the spec-canonical URL and the one referenced by
+  `resource_metadata=...` in `WWW-Authenticate` challenges; the
+  origin-rooted path is also served as a defensive fallback for
+  clients that probe the origin well-known location before following
+  the challenge hint. Both paths serve the same document, which
+  advertises `resource_signing_alg_values_supported: ["RS256",
+  "ES256"]` and `bearer_methods_supported: ["header"]`.
+- **Realm-bearing `WWW-Authenticate` challenges** (RFC 7235 §4.1 +
+  RFC 9728 §5.1). 401 responses carry `Bearer realm="..."
+  resource_metadata="..."`; 403 responses on missing scope emit
+  `error="insufficient_scope"` with the required-scope list.
+  Quoted-string escaping follows RFC 7230 §3.2.6.
+- **Bearer-in-query rejection** per OAuth 2.1 §5.1.1 — `?access_token=`
+  and `?authorization=` receive a 400 `invalid_request` on every path
+  (including `/healthz` and `/.well-known/*`). URL-bound bearers leak
+  into referrer headers, proxy logs, and browser history regardless of
+  destination.
+- **Typed deployment-posture errors** at startup when `public`-mode
+  configuration is incomplete or malformed. All raise
+  `DeploymentPostureError` with a `PostureErrorKind` discriminator so
+  callers can branch on the structured kind instead of the message:
+  `public_missing_jwks_uri`, `public_missing_issuer_url`,
+  `public_missing_resource_uri`, `public_resource_uri_not_https`,
+  `public_resource_uri_malformed`, `public_static_bearer_forbidden`.
+
+### Changed
+
+- `LOOKER_MCP_JWKS_URI`, `LOOKER_MCP_ISSUER_URL`, and
+  `LOOKER_MCP_RESOURCE_URI` are normalized at field-validator stage:
+  surrounding whitespace is stripped from all three, and the resource
+  URI additionally has a single trailing slash removed. Normalization
+  is mode-independent so `dev` deployments also carry canonical values
+  downstream.
+
+### Deprecated
+
+- `LOOKER_MCP_AUTH_TOKEN` (static bearer authentication). Emits a
+  `DeprecationWarning` at startup when set in `dev` mode. Rejected
+  outright in `public` mode (RFC 9068 §2.1 forbids symmetric static
+  bearers for OAuth 2.1 access tokens). Scheduled for removal in a
+  future major version; migrate to OIDC via the new
+  `LOOKER_MCP_MODE=public` configuration.
+
+Total tool count: unchanged (160 tools / 15 groups) — this is an
+infrastructure / deployment-posture release, not a tool surface expansion.
+
 ## [0.12.0] - 2026-04-15
 
 ### Added
