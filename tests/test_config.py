@@ -320,9 +320,7 @@ class TestMcpModePosture:
     def test_posture_error_carries_kind_and_message(self):
         from looker_mcp_server.config import DeploymentPostureError, PostureErrorKind
 
-        err = DeploymentPostureError(
-            PostureErrorKind.PUBLIC_MISSING_JWKS_URI, "detail"
-        )
+        err = DeploymentPostureError(PostureErrorKind.PUBLIC_MISSING_JWKS_URI, "detail")
         assert err.kind == PostureErrorKind.PUBLIC_MISSING_JWKS_URI
         assert "public_missing_jwks_uri" in str(err)
         assert "detail" in str(err)

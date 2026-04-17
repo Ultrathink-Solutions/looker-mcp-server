@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import parse_qs
 
 from .resource_server import OAuth21ResourceServer, TokenVerificationError
 from .www_authenticate import invalid_token_challenge
@@ -121,12 +122,31 @@ class PublicModeAuthMiddleware:
 
     @staticmethod
     def _is_bypass_path(path: str) -> bool:
-        return any(path == p.rstrip("/") or path.startswith(p) for p in _BYPASS_PREFIXES)
+        """Return True if ``path`` exactly matches or is a proper sub-path of
+        any bypass entry.
+
+        A naive ``path.startswith(p)`` check over ``_BYPASS_PREFIXES`` would
+        false-match ``/healthzfoo`` against ``/healthz``.  The fix: a match
+        requires either strict equality to the prefix (with trailing slash
+        stripped) or the prefix being followed by a ``/`` — a real path
+        separator rather than an arbitrary continuation.
+        """
+        for raw in _BYPASS_PREFIXES:
+            exact = raw.rstrip("/")
+            with_sep = exact + "/"
+            if path == exact or path.startswith(with_sep):
+                return True
+        return False
 
     async def _reject_bearer_in_query(self, scope: Scope, send: Send) -> bool:
         """OAuth 2.1 §5.1.1: bearer tokens in the URL query are forbidden.
 
         Returns True when a rejection was sent (caller should return).
+
+        Uses ``urllib.parse.parse_qs`` to decode into parameter names —
+        a substring match against the raw query string would false-positive
+        on benign queries like ``?filter=access_token=foo`` where
+        ``access_token`` appears in a *value* rather than as a key.
         """
         query_string: bytes = scope.get("query_string") or b""
         if not query_string:
@@ -134,8 +154,8 @@ class PublicModeAuthMiddleware:
         # Check both the spec-registered ``access_token`` (RFC 6750 §2.3
         # canonical name) and the defensive ``authorization`` parameter
         # (some clients misroute the header value into the query).
-        query = query_string.decode("latin-1")
-        if "access_token=" in query or "authorization=" in query:
+        params = parse_qs(query_string.decode("latin-1"), keep_blank_values=True)
+        if "access_token" in params or "authorization" in params:
             body = json.dumps(
                 {
                     "error": "invalid_request",

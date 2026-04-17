@@ -17,6 +17,7 @@ import time
 import httpx
 import jwt as pyjwt
 import pytest
+import respx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -210,10 +211,10 @@ class TestJWKSCache:
         with pytest.raises(ValueError, match="jwks_uri"):
             JWKSCache("")
 
-    async def test_happy_path_caches_and_returns_key(self, rsa_keypair, respx_mock):
-
+    @respx.mock
+    async def test_happy_path_caches_and_returns_key(self, rsa_keypair):
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
-        respx_mock.get(cache.jwks_uri).mock(
+        route = respx.get(cache.jwks_uri).mock(
             return_value=httpx.Response(200, json=_make_jwks(rsa_keypair["public_key"]))
         )
 
@@ -222,14 +223,15 @@ class TestJWKSCache:
 
         # Second call should hit the cache — route receives only one call.
         await cache.get_key("test-kid-1")
-        assert respx_mock.routes[0].call_count == 1
+        assert route.call_count == 1
 
-    async def test_unknown_kid_forces_one_refresh_then_raises(self, rsa_keypair, respx_mock):
+    @respx.mock
+    async def test_unknown_kid_forces_one_refresh_then_raises(self, rsa_keypair):
         cache = JWKSCache(
             "https://as.example.com/.well-known/jwks.json",
             kid_miss_cooldown_seconds=60,
         )
-        route = respx_mock.get(cache.jwks_uri).mock(
+        route = respx.get(cache.jwks_uri).mock(
             return_value=httpx.Response(200, json=_make_jwks(rsa_keypair["public_key"]))
         )
 
@@ -240,18 +242,20 @@ class TestJWKSCache:
         # forced refresh (second fetch). Both fail to find the kid.
         assert route.call_count == 2
 
-    async def test_cold_start_failure_raises(self, respx_mock):
+    @respx.mock
+    async def test_cold_start_failure_raises(self):
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
-        respx_mock.get(cache.jwks_uri).mock(return_value=httpx.Response(503))
+        respx.get(cache.jwks_uri).mock(return_value=httpx.Response(503))
 
         with pytest.raises(JWKSError, match="failed to fetch"):
             await cache.get_key("any-kid")
 
-    async def test_symmetric_keys_rejected_from_jwks(self, respx_mock):
+    @respx.mock
+    async def test_symmetric_keys_rejected_from_jwks(self):
         """A JWKS entry advertising HS256 is silently dropped (not used for
         verification) — defence in depth against an AS that serves mixed algs."""
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
-        respx_mock.get(cache.jwks_uri).mock(
+        respx.get(cache.jwks_uri).mock(
             return_value=httpx.Response(
                 200,
                 json={"keys": [{"kty": "oct", "alg": "HS256", "kid": "hs-1", "k": "c2VjcmV0"}]},
@@ -267,9 +271,11 @@ class TestJWKSCache:
 
 
 class TestOAuth21ResourceServer:
-    def _make_validator(self, rsa_keypair, respx_mock):
+    def _make_validator(self, rsa_keypair):
+        """Configure a JWKS mock (caller must be inside @respx.mock scope)
+        and return a validator ready to exercise."""
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
-        respx_mock.get(cache.jwks_uri).mock(
+        respx.get(cache.jwks_uri).mock(
             return_value=httpx.Response(200, json=_make_jwks(rsa_keypair["public_key"]))
         )
         return OAuth21ResourceServer(
@@ -278,8 +284,9 @@ class TestOAuth21ResourceServer:
             audience="https://looker.example.com/mcp",
         )
 
-    async def test_happy_path_rs256(self, rsa_keypair, respx_mock):
-        validator = self._make_validator(rsa_keypair, respx_mock)
+    @respx.mock
+    async def test_happy_path_rs256(self, rsa_keypair):
+        validator = self._make_validator(rsa_keypair)
         token = _mint(private_pem=rsa_keypair["private_pem"])
 
         verified = await validator.verify(token)
@@ -288,11 +295,12 @@ class TestOAuth21ResourceServer:
         assert verified.alg == "RS256"
         assert verified.scopes == ["looker:read"]
 
-    async def test_hs256_token_rejected(self, rsa_keypair, respx_mock):
+    @respx.mock
+    async def test_hs256_token_rejected(self, rsa_keypair):
         """Even if an attacker mints an HS256 token with any secret, the
         algorithm allowlist rejects it at the header-inspection stage —
         classic algorithm-confusion defense (RFC 9068 §2.1)."""
-        validator = self._make_validator(rsa_keypair, respx_mock)
+        validator = self._make_validator(rsa_keypair)
         attacker_token = pyjwt.encode(
             {"iss": "https://as.example.com", "aud": "https://looker.example.com/mcp", "sub": "x"},
             "attacker-secret",
@@ -301,8 +309,9 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="unsupported or missing alg"):
             await validator.verify(attacker_token)
 
-    async def test_wrong_audience_rejected(self, rsa_keypair, respx_mock):
-        validator = self._make_validator(rsa_keypair, respx_mock)
+    @respx.mock
+    async def test_wrong_audience_rejected(self, rsa_keypair):
+        validator = self._make_validator(rsa_keypair)
         token = _mint(
             private_pem=rsa_keypair["private_pem"],
             aud="https://someone-else.example/mcp",
@@ -310,8 +319,9 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
-    async def test_wrong_issuer_rejected(self, rsa_keypair, respx_mock):
-        validator = self._make_validator(rsa_keypair, respx_mock)
+    @respx.mock
+    async def test_wrong_issuer_rejected(self, rsa_keypair):
+        validator = self._make_validator(rsa_keypair)
         token = _mint(
             private_pem=rsa_keypair["private_pem"],
             iss="https://other-as.example.com",
@@ -319,16 +329,18 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
-    async def test_expired_rejected(self, rsa_keypair, respx_mock):
-        validator = self._make_validator(rsa_keypair, respx_mock)
+    @respx.mock
+    async def test_expired_rejected(self, rsa_keypair):
+        validator = self._make_validator(rsa_keypair)
         token = _mint(private_pem=rsa_keypair["private_pem"], ttl=-60)
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
-    async def test_forged_with_different_key_rejected(self, rsa_keypair, respx_mock):
+    @respx.mock
+    async def test_forged_with_different_key_rejected(self, rsa_keypair):
         """A token signed with an UNRELATED RSA key fails signature check
         even if its kid matches the one published."""
-        validator = self._make_validator(rsa_keypair, respx_mock)
+        validator = self._make_validator(rsa_keypair)
         other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         other_pem = other.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -339,8 +351,9 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="invalid token"):
             await validator.verify(token)
 
-    async def test_missing_kid_header_rejected(self, rsa_keypair, respx_mock):
-        validator = self._make_validator(rsa_keypair, respx_mock)
+    @respx.mock
+    async def test_missing_kid_header_rejected(self, rsa_keypair):
+        validator = self._make_validator(rsa_keypair)
         token = pyjwt.encode(
             {"iss": "https://as.example.com", "aud": "https://looker.example.com/mcp", "sub": "x"},
             rsa_keypair["private_pem"],
@@ -350,12 +363,14 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="missing kid"):
             await validator.verify(token)
 
-    async def test_empty_token_rejected(self, rsa_keypair, respx_mock):
-        validator = self._make_validator(rsa_keypair, respx_mock)
+    @respx.mock
+    async def test_empty_token_rejected(self, rsa_keypair):
+        validator = self._make_validator(rsa_keypair)
         with pytest.raises(TokenVerificationError, match="empty token"):
             await validator.verify("")
 
-    async def test_construct_empty_issuer_rejected(self, rsa_keypair, respx_mock):
+    async def test_construct_empty_issuer_rejected(self):
+        """No respx mock needed — construction fails before any HTTP call."""
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
         with pytest.raises(ValueError, match="issuer"):
             OAuth21ResourceServer(cache, issuer="", audience="https://x/")

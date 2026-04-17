@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Self
 from urllib.parse import urlparse
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-class LookerMcpMode(str, Enum):
+
+class LookerMcpMode(StrEnum):
     """Deployment posture for the MCP endpoint.
 
     See ``LookerConfig.mcp_mode`` for a description of each mode's behavior.
@@ -19,7 +20,7 @@ class LookerMcpMode(str, Enum):
     PUBLIC = "public"
 
 
-class PostureErrorKind(str, Enum):
+class PostureErrorKind(StrEnum):
     """Discriminator for :class:`DeploymentPostureError` subclasses.
 
     Kinds round-trip cleanly into log records and JSON; callers switch on
@@ -165,7 +166,7 @@ class LookerConfig(BaseSettings):
     log_level: str = "INFO"
 
     # ── MCP-level auth (who can talk to *this* server) ───────────────
-    mcp_mode: "LookerMcpMode" = None  # type: ignore[assignment]  # defaulted in validator
+    mcp_mode: LookerMcpMode = None  # type: ignore[assignment]  # defaulted in validator
     """Deployment posture for the MCP endpoint.
 
     - ``dev`` (default): permissive. Local development and trusted-network
@@ -315,8 +316,7 @@ class LookerConfig(BaseSettings):
         if not parsed.scheme or not parsed.netloc:
             raise DeploymentPostureError(
                 PostureErrorKind.PUBLIC_RESOURCE_URI_MALFORMED,
-                f"LOOKER_MCP_RESOURCE_URI={self.mcp_resource_uri!r} is not a "
-                "valid absolute URI.",
+                f"LOOKER_MCP_RESOURCE_URI={self.mcp_resource_uri!r} is not a valid absolute URI.",
             )
         if parsed.fragment:
             raise DeploymentPostureError(
