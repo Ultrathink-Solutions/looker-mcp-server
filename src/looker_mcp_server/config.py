@@ -35,6 +35,20 @@ class PostureErrorKind(StrEnum):
     PUBLIC_STATIC_BEARER_FORBIDDEN = "public_static_bearer_forbidden"
 
 
+def _is_absolute_https_url(value: str) -> bool:
+    """Return True iff ``value`` parses as an absolute ``https://host[...]`` URL.
+
+    Empty strings, non-https schemes, and URLs without a host component all
+    fail. Used at public-mode config validation to reject obviously-malformed
+    JWKS/issuer endpoints at startup rather than letting the failure surface
+    as opaque verification errors at request time.
+    """
+    if not value:
+        return False
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
 class DeploymentPostureError(ValueError):
     """Raised at startup when the configured deployment posture is
     self-inconsistent.
@@ -289,19 +303,23 @@ class LookerConfig(BaseSettings):
                 "or switch to LOOKER_MCP_MODE=dev for local iteration.",
             )
 
-        if not self.mcp_jwks_uri:
+        jwks_uri = (self.mcp_jwks_uri or "").strip()
+        if not jwks_uri or not _is_absolute_https_url(jwks_uri):
             raise DeploymentPostureError(
                 PostureErrorKind.PUBLIC_MISSING_JWKS_URI,
-                "LOOKER_MCP_MODE=public requires LOOKER_MCP_JWKS_URI — "
-                "the JWK Set document (RFC 7517) of the authorization server "
-                "that issues access tokens for this resource.",
+                "LOOKER_MCP_MODE=public requires LOOKER_MCP_JWKS_URI to be a "
+                "non-empty absolute https URL — the JWK Set document (RFC 7517) "
+                "of the authorization server that issues access tokens for this "
+                f"resource. Got {self.mcp_jwks_uri!r}.",
             )
 
-        if not self.mcp_issuer_url:
+        issuer_url = (self.mcp_issuer_url or "").strip()
+        if not issuer_url or not _is_absolute_https_url(issuer_url):
             raise DeploymentPostureError(
                 PostureErrorKind.PUBLIC_MISSING_ISSUER_URL,
-                "LOOKER_MCP_MODE=public requires LOOKER_MCP_ISSUER_URL — "
-                "the expected JWT `iss` claim (RFC 8414).",
+                "LOOKER_MCP_MODE=public requires LOOKER_MCP_ISSUER_URL to be a "
+                "non-empty absolute https URL — the expected JWT `iss` claim "
+                f"(RFC 8414). Got {self.mcp_issuer_url!r}.",
             )
 
         if not self.mcp_resource_uri:

@@ -79,8 +79,11 @@ class JWKSCache:
 
         self._lock = asyncio.Lock()
         self._keys: dict[str, PyJWK] = {}
-        self._fetched_at: float = 0.0
-        self._last_forced_refresh: float = 0.0
+        # Sentinel: -inf means "never fetched". Don't use 0.0 — time.monotonic()
+        # can return values less than self._ttl on freshly-booted hosts, so
+        # 0.0 would spuriously report the cache as fresh without a fetch.
+        self._fetched_at: float = float("-inf")
+        self._last_forced_refresh: float = float("-inf")
 
     @property
     def jwks_uri(self) -> str:

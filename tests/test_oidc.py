@@ -207,7 +207,7 @@ class TestBuildPrmDocument:
 
 
 class TestJWKSCache:
-    async def test_empty_jwks_uri_rejected(self):
+    def test_empty_jwks_uri_rejected(self):
         with pytest.raises(ValueError, match="jwks_uri"):
             JWKSCache("")
 
@@ -381,7 +381,7 @@ class TestOAuth21ResourceServer:
         with pytest.raises(TokenVerificationError, match="empty token"):
             await validator.verify("")
 
-    async def test_construct_empty_issuer_rejected(self):
+    def test_construct_empty_issuer_rejected(self):
         """No respx mock needed — construction fails before any HTTP call."""
         cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
         with pytest.raises(ValueError, match="issuer"):

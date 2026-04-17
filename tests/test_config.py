@@ -228,6 +228,56 @@ class TestMcpModePosture:
                 LookerConfig(_env_file=None)  # type: ignore[call-arg]
         assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_ISSUER_URL
 
+    @pytest.mark.parametrize(
+        "bad_jwks",
+        [
+            "http://as.example.com/.well-known/jwks.json",  # plaintext
+            "as.example.com/.well-known/jwks.json",  # no scheme
+            "https://",  # no host
+            "   ",  # whitespace only
+        ],
+    )
+    def test_public_mode_rejects_malformed_jwks_uri(self, bad_jwks: str):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(LOOKER_MCP_MODE="public", LOOKER_MCP_JWKS_URI=bad_jwks),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_JWKS_URI
+
+    @pytest.mark.parametrize(
+        "bad_issuer",
+        [
+            "http://as.example.com",
+            "as.example.com",
+            "https://",
+            "   ",
+        ],
+    )
+    def test_public_mode_rejects_malformed_issuer_url(self, bad_issuer: str):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="https://as.example.com/.well-known/jwks.json",
+                LOOKER_MCP_ISSUER_URL=bad_issuer,
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_ISSUER_URL
+
     def test_public_mode_requires_resource_uri(self):
         from pydantic import ValidationError
 
