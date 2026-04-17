@@ -13,11 +13,16 @@ without bounds on repeated ``kid`` misses is a DoS vector against the AS.
   accommodates key rotations without flooding the AS on brute-force
   attempts with random ``kid`` values.
 - Cold-start fetch failures are re-raised — the resource server must fail
-  closed rather than admit unverified tokens.
+  closed rather than admit unverified tokens. Post-cold-start failures
+  (network, JSON parse, payload shape, zero-usable-keys) preserve the
+  current cache instead of wiping it; in-flight tokens keep verifying
+  against known keys while the operator debugs the AS.
 
-Only asymmetric signing algorithms are accepted (RFC 9068 §2.1).  Symmetric
-algorithms expose the classic algorithm-confusion attack where an
-attacker re-signs a token with the fetched public key as an HMAC secret.
+Only ``RS256`` and ``ES256`` are accepted — the algorithms the framework
+advertises via PRM ``resource_signing_alg_values_supported``. Symmetric
+algorithms (``HS*``) are excluded because they expose the classic
+algorithm-confusion attack where an attacker re-signs a token with the
+fetched public key as an HMAC secret (RFC 9068 §2.1).
 """
 
 from __future__ import annotations
@@ -33,12 +38,23 @@ from jwt import PyJWK
 logger = logging.getLogger(__name__)
 
 #: Asymmetric signing algorithms this cache will accept from JWKS entries.
+#: Narrow by design: matches the two algorithms the PRM document
+#: advertises in `resource_signing_alg_values_supported`. An IdP rotating
+#: to an algorithm outside this set is a configuration change the operator
+#: must opt into explicitly (widen this set) rather than something the
+#: framework silently accepts.
+#:
 #: HS* is intentionally excluded — RFC 9068 §2.1 forbids symmetric signing
 #: for OAuth 2.1 access tokens, and accepting public keys here under an
 #: HS alg opens the algorithm-confusion attack surface.
-ALLOWED_SIGNING_ALGORITHMS: frozenset[str] = frozenset(
-    {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
-)
+ALLOWED_SIGNING_ALGORITHMS: frozenset[str] = frozenset({"RS256", "ES256"})
+
+#: Expected JWK `kty` value for each allowed algorithm. Used as a defense-
+#: in-depth check when importing keys from a JWKS document — an advertised
+#: alg of RS256 but kty=EC (or worse, kty=oct) signals either a
+#: misconfigured AS or an algorithm-confusion attempt, and the key is
+#: skipped rather than imported.
+_ALG_KTY: dict[str, str] = {"RS256": "RSA", "ES256": "EC"}
 
 
 class JWKSError(Exception):
@@ -134,33 +150,61 @@ class JWKSCache:
         return (time.monotonic() - self._fetched_at) < self._ttl
 
     async def _refresh(self) -> None:
+        """Fetch + parse the JWKS, atomically swap the cache on success.
+
+        Failure-handling contract (applied uniformly across network,
+        parse, and validation errors):
+
+        - If we have existing cached keys, log the failure and return
+          without modifying state. A transient upstream failure must not
+          invalidate keys that are still cryptographically valid for
+          in-flight tokens.
+        - If we have no cached keys (cold start or prior refresh already
+          emptied us), raise :class:`JWKSError` so the caller fails
+          closed rather than admitting unverified tokens.
+        """
         logger.debug("jwks.refresh.start", extra={"jwks_uri": self._jwks_uri})
+
+        # ── Stage 1: HTTP fetch + JSON parse ─────────────────────────
         try:
             async with httpx.AsyncClient(timeout=self._http_timeout) as client:
                 resp = await client.get(self._jwks_uri)
                 resp.raise_for_status()
                 payload: Any = resp.json()
-        except httpx.HTTPError as exc:
-            logger.warning(
+        except (httpx.HTTPError, ValueError) as exc:
+            # httpx.HTTPError covers network / timeout / non-2xx.
+            # ValueError covers resp.json() failing to decode
+            # (json.JSONDecodeError is a ValueError subclass).
+            return self._handle_refresh_failure(
                 "jwks.refresh.failed",
-                extra={"jwks_uri": self._jwks_uri, "error": str(exc)},
+                f"failed to fetch JWKS: {exc}",
+                exc,
             )
-            # If we have ANY cached keys, preserve them — the caller can
-            # still validate tokens whose kid is already known. If we
-            # don't, re-raise so the caller can fail closed at cold start.
-            if not self._keys:
-                raise JWKSError(f"failed to fetch JWKS: {exc}") from exc
-            return
 
+        # ── Stage 2: payload shape validation ────────────────────────
         if not isinstance(payload, dict) or not isinstance(payload.get("keys"), list):
-            raise JWKSError(
+            return self._handle_refresh_failure(
+                "jwks.refresh.invalid_payload",
                 f"JWKS response at {self._jwks_uri} is not a valid RFC 7517 "
-                f"document (missing 'keys' array)"
+                f"document (missing 'keys' array)",
+                cause=None,
             )
 
+        # ── Stage 3: key import ──────────────────────────────────────
         new_keys: dict[str, PyJWK] = {}
         for raw in payload["keys"]:
             if not isinstance(raw, dict):
+                continue
+            kty = raw.get("kty")
+            # Always reject symmetric keys — they are never valid for
+            # RFC 9068 access-token signatures and would open the
+            # algorithm-confusion attack vector if imported and later
+            # matched under an asymmetric alg.
+            if kty == "oct":
+                logger.debug(
+                    "jwks.refresh.skip_symmetric",
+                    extra={"kty": kty, "kid": raw.get("kid")},
+                )
                 continue
             alg = raw.get("alg")
             if alg and alg not in ALLOWED_SIGNING_ALGORITHMS:
@@ -170,6 +214,16 @@ class JWKSCache:
                 logger.debug(
                     "jwks.refresh.skip_unsupported_alg",
                     extra={"alg": alg, "kid": raw.get("kid")},
+                )
+                continue
+            # Defense in depth: when the JWKS advertises alg, the kty
+            # family must match. RS256 + EC key (or RS256 + oct, which
+            # we already rejected above) is either a misconfigured AS
+            # or an algorithm-confusion probe.
+            if alg and _ALG_KTY.get(alg) is not None and kty != _ALG_KTY[alg]:
+                logger.warning(
+                    "jwks.refresh.skip_kty_mismatch",
+                    extra={"alg": alg, "kty": kty, "kid": raw.get("kid")},
                 )
                 continue
             kid = raw.get("kid")
@@ -184,14 +238,38 @@ class JWKSCache:
                 )
 
         if not new_keys:
-            raise JWKSError(
+            return self._handle_refresh_failure(
+                "jwks.refresh.no_usable_keys",
                 f"JWKS at {self._jwks_uri} contains no usable "
-                f"asymmetric keys (allowed: {sorted(ALLOWED_SIGNING_ALGORITHMS)})"
+                f"asymmetric keys (allowed: {sorted(ALLOWED_SIGNING_ALGORITHMS)})",
+                cause=None,
             )
 
+        # ── Stage 4: atomic swap ─────────────────────────────────────
         self._keys = new_keys
         self._fetched_at = time.monotonic()
         logger.debug(
             "jwks.refresh.success",
             extra={"jwks_uri": self._jwks_uri, "key_count": len(new_keys)},
         )
+
+    def _handle_refresh_failure(
+        self,
+        event: str,
+        message: str,
+        cause: BaseException | None,
+    ) -> None:
+        """Uniform post-success / cold-start failure split.
+
+        Called on every failure mode (HTTP, JSON parse, invalid payload
+        shape, zero usable keys). If the cache already holds valid keys,
+        log and return — in-flight tokens keep verifying. If not, raise
+        :class:`JWKSError` so the caller fails closed at cold start.
+        """
+        logger.warning(event, extra={"jwks_uri": self._jwks_uri, "error": message})
+        if self._keys:
+            return
+        err = JWKSError(message)
+        if cause is not None:
+            raise err from cause
+        raise err

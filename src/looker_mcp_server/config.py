@@ -312,6 +312,9 @@ class LookerConfig(BaseSettings):
                 "of the authorization server that issues access tokens for this "
                 f"resource. Got {self.mcp_jwks_uri!r}.",
             )
+        # Persist the trimmed value back so JWKSCache doesn't fetch a URL
+        # with surrounding whitespace (which httpx would reject / error on).
+        self.mcp_jwks_uri = jwks_uri
 
         issuer_url = (self.mcp_issuer_url or "").strip()
         if not issuer_url or not _is_absolute_https_url(issuer_url):
@@ -321,6 +324,10 @@ class LookerConfig(BaseSettings):
                 "non-empty absolute https URL — the expected JWT `iss` claim "
                 f"(RFC 8414). Got {self.mcp_issuer_url!r}.",
             )
+        # Same rationale as mcp_jwks_uri above: the iss comparison in
+        # PyJWT is an exact-string match, so trailing whitespace in the
+        # configured issuer would silently break token validation.
+        self.mcp_issuer_url = issuer_url
 
         if not self.mcp_resource_uri:
             raise DeploymentPostureError(

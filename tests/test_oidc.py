@@ -268,6 +268,97 @@ class TestJWKSCache:
         with pytest.raises(JWKSError, match="no usable asymmetric keys"):
             await cache.get_key("hs-1")
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_narrow_alg_allowlist_rejects_rs384(self, rsa_keypair):
+        """ALLOWED_SIGNING_ALGORITHMS is narrow (RS256/ES256 only). An IdP
+        serving an RS384 key is not silently accepted — the operator must
+        opt into widening the allowlist explicitly."""
+        from jwt.algorithms import RSAAlgorithm
+
+        jwk = RSAAlgorithm.to_jwk(rsa_keypair["public_key"], as_dict=True)
+        jwk.update({"kid": "rs384-key", "use": "sig", "alg": "RS384"})
+        cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
+        respx.get(cache.jwks_uri).mock(return_value=httpx.Response(200, json={"keys": [jwk]}))
+        with pytest.raises(JWKSError, match="no usable asymmetric keys"):
+            await cache.get_key("rs384-key")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_kty_mismatch_dropped(self, rsa_keypair):
+        """An RS256-advertised key with kty=EC is a misconfiguration or an
+        algorithm-confusion probe — skip rather than import."""
+        from jwt.algorithms import RSAAlgorithm
+
+        rsa_jwk = RSAAlgorithm.to_jwk(rsa_keypair["public_key"], as_dict=True)
+        # Fake an RS256-labelled entry but lie about the kty.
+        bad_jwk = dict(rsa_jwk)
+        bad_jwk.update({"kid": "mismatch-1", "use": "sig", "alg": "RS256", "kty": "EC"})
+        cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
+        respx.get(cache.jwks_uri).mock(return_value=httpx.Response(200, json={"keys": [bad_jwk]}))
+        with pytest.raises(JWKSError, match="no usable asymmetric keys"):
+            await cache.get_key("mismatch-1")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_invalid_json_after_success_preserves_cache(self, rsa_keypair):
+        """Post-success transient AS failures (malformed JSON body) must
+        not wipe the existing cache — in-flight tokens keep verifying."""
+        cache = JWKSCache(
+            "https://as.example.com/.well-known/jwks.json",
+            ttl_seconds=0.0,  # immediately stale so the next call forces _refresh
+        )
+        route = respx.get(cache.jwks_uri).mock(
+            side_effect=[
+                httpx.Response(200, json=_make_jwks(rsa_keypair["public_key"])),
+                httpx.Response(200, content=b"not-json"),
+            ]
+        )
+
+        jwk = await cache.get_key("test-kid-1")
+        assert jwk.key_id == "test-kid-1"
+
+        # Second call triggers a refresh (TTL=0) against a broken JSON body.
+        # The existing cache entry must still resolve.
+        jwk2 = await cache.get_key("test-kid-1")
+        assert jwk2.key_id == "test-kid-1"
+        assert route.call_count == 2
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_zero_usable_keys_after_success_preserves_cache(self, rsa_keypair):
+        """Same contract as the JSON-parse case: an AS that goes through a
+        bad-config window and returns `{"keys": []}` must not invalidate
+        keys the cache has already admitted."""
+        cache = JWKSCache(
+            "https://as.example.com/.well-known/jwks.json",
+            ttl_seconds=0.0,
+        )
+        route = respx.get(cache.jwks_uri).mock(
+            side_effect=[
+                httpx.Response(200, json=_make_jwks(rsa_keypair["public_key"])),
+                httpx.Response(200, json={"keys": []}),
+            ]
+        )
+
+        jwk = await cache.get_key("test-kid-1")
+        assert jwk.key_id == "test-kid-1"
+
+        jwk2 = await cache.get_key("test-kid-1")
+        assert jwk2.key_id == "test-kid-1"
+        assert route.call_count == 2
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_invalid_payload_shape_cold_start_fails_closed(self):
+        """Contrast to the post-success tests above: if the AS is broken
+        on the FIRST fetch (cold start), raise so the caller fails closed
+        rather than silently accept an empty cache."""
+        cache = JWKSCache("https://as.example.com/.well-known/jwks.json")
+        respx.get(cache.jwks_uri).mock(return_value=httpx.Response(200, json={"not_keys": 123}))
+        with pytest.raises(JWKSError, match="not a valid RFC 7517"):
+            await cache.get_key("any-kid")
+
 
 # ---------------------------------------------------------------------------
 # Resource server validator

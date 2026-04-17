@@ -278,6 +278,25 @@ class TestMcpModePosture:
                 LookerConfig(_env_file=None)  # type: ignore[call-arg]
         assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_MISSING_ISSUER_URL
 
+    def test_public_mode_trims_whitespace_on_jwks_and_issuer(self):
+        """Surrounding whitespace on LOOKER_MCP_JWKS_URI / LOOKER_MCP_ISSUER_URL
+        must be stripped BOTH during validation AND on the stored value, or
+        downstream consumers (JWKSCache, PyJWT's exact-match iss check) break
+        in subtle ways."""
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="public",
+                LOOKER_MCP_JWKS_URI="  https://as.example.com/.well-known/jwks.json  ",
+                LOOKER_MCP_ISSUER_URL="\thttps://as.example.com\n",
+                LOOKER_MCP_RESOURCE_URI="https://looker.example.com/mcp",
+            ),
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_jwks_uri == "https://as.example.com/.well-known/jwks.json"
+        assert config.mcp_issuer_url == "https://as.example.com"
+
     def test_public_mode_requires_resource_uri(self):
         from pydantic import ValidationError
 
