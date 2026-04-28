@@ -107,6 +107,275 @@ class TestUpdateSchedule:
             await looker_client.close()
 
 
+WRITABLE_SCHEDULE_FIELDS = {
+    "name",
+    "user_id",
+    "run_as_recipient",
+    "enabled",
+    "look_id",
+    "dashboard_id",
+    "lookml_dashboard_id",
+    "filters_string",
+    "require_results",
+    "require_no_results",
+    "require_change",
+    "send_all_results",
+    "crontab",
+    "datagroup",
+    "timezone",
+    "run_once",
+    "include_links",
+    "custom_url_base",
+    "custom_url_params",
+    "custom_url_label",
+    "show_custom_url",
+    "pdf_paper_size",
+    "pdf_landscape",
+    "embed",
+    "color_theme",
+    "long_tables",
+    "inline_table_width",
+    "query_id",
+    # Destinations are exposed as two flat params (recipients + destinations),
+    # not a single nested array — keeps the tool surface ergonomic.
+    "recipients",
+    "destinations",
+}
+
+
+class TestCreateScheduleSurface:
+    """The full WriteScheduledPlan surface must be reachable on create_schedule
+    so agents can configure conditional delivery, datagroup triggers,
+    custom URLs, PDF rendering, and non-email destinations end-to-end.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_schedule_exposes_all_writable_fields(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            tools = {t.name: t for t in await mcp.list_tools()}
+            props = tools["create_schedule"].parameters["properties"]
+            missing = WRITABLE_SCHEDULE_FIELDS - props.keys()
+            assert not missing, f"create_schedule missing writable fields: {sorted(missing)}"
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_exposes_all_writable_fields(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            tools = {t.name: t for t in await mcp.list_tools()}
+            props = tools["update_schedule"].parameters["properties"]
+            missing = WRITABLE_SCHEDULE_FIELDS - props.keys()
+            assert not missing, f"update_schedule missing writable fields: {sorted(missing)}"
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_recipients_shorthand_builds_email_destinations(self, config):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "1", "name": "weekly"})
+
+        respx.post(f"{API_URL}/scheduled_plans").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "weekly",
+                    "crontab": "0 9 * * 1",
+                    "dashboard_id": "42",
+                    "recipients": ["a@x.com", "b@x.com"],
+                },
+            )()
+            assert captured["body"]["scheduled_plan_destination"] == [
+                {"type": "email", "address": "a@x.com"},
+                {"type": "email", "address": "b@x.com"},
+            ]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_destinations_passes_through_full_shape(self, config):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "1", "name": "to-s3"})
+
+        respx.post(f"{API_URL}/scheduled_plans").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            destinations = [
+                {
+                    "type": "s3",
+                    "format": "csv",
+                    "address": "my-bucket/exports",
+                    "parameters": '{"region": "us-east-1"}',
+                    "secret_parameters": '{"access_key_id": "AKIA...", "secret_access_key": "..."}',
+                }
+            ]
+            await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "to-s3",
+                    "crontab": "0 0 * * *",
+                    "query_id": "Q123",
+                    "destinations": destinations,
+                },
+            )()
+            # Destinations are passed through unchanged so non-email types work.
+            assert captured["body"]["scheduled_plan_destination"] == destinations
+            # query_id is the target — look_id/dashboard_id absent.
+            assert captured["body"]["query_id"] == "Q123"
+            assert "look_id" not in captured["body"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    async def test_recipients_and_destinations_are_mutually_exclusive(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            # No outbound HTTP mock — any leak would raise.
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "x",
+                    "crontab": "0 9 * * *",
+                    "dashboard_id": "42",
+                    "recipients": ["a@x.com"],
+                    "destinations": [{"type": "email", "address": "b@x.com"}],
+                },
+            )()
+            assert "not both" in payload["error"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    async def test_no_target_returns_actionable_error(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {"name": "x", "crontab": "0 9 * * *"},
+            )()
+            assert "No target" in payload["error"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    async def test_multiple_targets_returns_actionable_error(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "x",
+                    "crontab": "0 9 * * *",
+                    "look_id": "1",
+                    "dashboard_id": "2",
+                },
+            )()
+            assert "Multiple targets" in payload["error"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_advanced_fields_round_trip_through_body(self, config):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "9"})
+
+        respx.post(f"{API_URL}/scheduled_plans").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "advanced",
+                    "lookml_dashboard_id": "ml-99",
+                    "datagroup": "daily_etl",
+                    "timezone": "America/New_York",
+                    "require_change": True,
+                    "send_all_results": True,
+                    "filters_string": "f[date]=last 7 days",
+                    "pdf_landscape": True,
+                    "pdf_paper_size": "letter",
+                    "long_tables": True,
+                    "color_theme": "dark",
+                    "show_custom_url": True,
+                    "custom_url_base": "https://reports.example.com",
+                    "custom_url_label": "View in Reports",
+                    "destinations": [{"type": "email", "address": "ops@x.com"}],
+                },
+            )()
+            body = captured["body"]
+            # Key conditional / trigger fields make it on the wire.
+            assert body["datagroup"] == "daily_etl"
+            assert body["require_change"] is True
+            assert body["send_all_results"] is True
+            assert body["timezone"] == "America/New_York"
+            assert body["pdf_landscape"] is True
+            assert body["color_theme"] == "dark"
+            assert body["custom_url_base"] == "https://reports.example.com"
+            # crontab was NOT provided — must NOT be sent (would conflict with datagroup).
+            assert "crontab" not in body
+        finally:
+            await looker_client.close()
+
+
+class TestUpdateScheduleAdvanced:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_destinations_replace_supports_clearing(self, config):
+        # Passing destinations=[] (empty list) must reach Looker so it clears
+        # the existing destinations — _set_if would have stripped this, the
+        # tool uses `is not None` instead.
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"id": "42"})
+
+        respx.patch(f"{API_URL}/scheduled_plans/42").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "update_schedule",
+                {"schedule_id": "42", "destinations": []},
+            )()
+            assert captured["body"] == {"scheduled_plan_destination": []}
+        finally:
+            await looker_client.close()
+
+
 class TestRunScheduleOnce:
     @pytest.mark.asyncio
     @respx.mock
