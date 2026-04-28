@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `list_group_groups` — enumerate sub-groups under a parent.
   - `list_group_users` — enumerate direct user members of a group
     (visibility companion to `add_group_user` / `remove_group_user`).
+- **Full `WriteScheduledPlan` field surface on `create_schedule` and
+  `update_schedule`.** Every writable field of Looker's
+  `WriteScheduledPlan` schema is now reachable, so all delivery
+  configurations are setable from an MCP client:
+  - **Targets**: `lookml_dashboard_id` and `query_id` join the
+    existing `look_id` / `dashboard_id` (exactly one is required).
+  - **Destinations**: a new `destinations` parameter accepts the full
+    `ScheduledPlanDestination` array — supports `email`, `webhook`,
+    `s3`, and `sftp` types, with `format`, `apply_formatting`,
+    `apply_vis`, `parameters` (JSON string), `secret_parameters`
+    (write-only JSON for credentials), and `message`. The pre-existing
+    `recipients` shorthand still builds an email-only destinations
+    array; the two are mutually exclusive.
+  - **Conditional delivery**: `require_results`, `require_no_results`,
+    `require_change`, `send_all_results`.
+  - **Trigger options**: `enabled`, `run_once`, `datagroup`,
+    `timezone`, plus `user_id` for delegated ownership.
+  - **PDF/render options**: `pdf_paper_size`, `pdf_landscape`,
+    `long_tables`, `inline_table_width`, `color_theme`, `embed`.
+  - **Branded URLs**: `show_custom_url`, `custom_url_base`,
+    `custom_url_params`, `custom_url_label`.
+  - **Filters**: `filters_string`.
 
 ### Changed
 
@@ -70,6 +92,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `update_user` returns an actionable error when no fields are
   provided (matching the pattern already used by `update_schedule`),
   rather than issuing an empty PATCH.
+- `create_schedule` now validates that **exactly one** of `look_id`,
+  `dashboard_id`, `lookml_dashboard_id`, or `query_id` is provided —
+  returns an actionable error otherwise (previously, omitting all four
+  was silently accepted and rejected later by Looker).
+- `update_schedule` and `create_schedule`'s `destinations` and
+  `recipients` parameters use `is not None` semantics rather than
+  truthy checks, so an explicit empty list is detected as
+  "argument supplied" rather than silently dropped.
+- Both `create_schedule` and `update_schedule` now reject the
+  `crontab` + `datagroup` combination up front (the two are mutually
+  exclusive trigger modes per the WriteScheduledPlan spec). Previously
+  the request would have been forwarded to Looker, which returns a
+  less actionable error.
 
 ### Removed
 
