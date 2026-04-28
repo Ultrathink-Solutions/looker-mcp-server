@@ -197,8 +197,46 @@ class TestCreateScheduleSurface:
                 },
             )()
             assert captured["body"]["scheduled_plan_destination"] == [
-                {"type": "email", "address": "a@x.com"},
-                {"type": "email", "address": "b@x.com"},
+                # Recipients shorthand always sets format — Looker rejects
+                # destinations without one. Default is ``wysiwyg_pdf`` (Looker
+                # UI's default for dashboard email schedules).
+                {"type": "email", "address": "a@x.com", "format": "wysiwyg_pdf"},
+                {"type": "email", "address": "b@x.com", "format": "wysiwyg_pdf"},
+            ]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_email_format_override_for_recipients_shorthand(self, config):
+        # Common scenario: emailing a Look's data as CSV instead of the
+        # default PDF. The email_format param overrides per-call so callers
+        # don't have to fall back to the full destinations shape.
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "1", "name": "weekly-csv"})
+
+        respx.post(f"{API_URL}/scheduled_plans").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "weekly-csv",
+                    "crontab": "0 9 * * 1",
+                    "look_id": "42",
+                    "recipients": ["a@x.com"],
+                    "email_format": "csv",
+                },
+            )()
+            assert captured["body"]["scheduled_plan_destination"] == [
+                {"type": "email", "address": "a@x.com", "format": "csv"},
             ]
         finally:
             await looker_client.close()

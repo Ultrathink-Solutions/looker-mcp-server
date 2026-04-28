@@ -964,6 +964,17 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
             list[str] | None,
             "Email-only shorthand: each address becomes an email destination",
         ] = None,
+        email_format: Annotated[
+            str,
+            (
+                "Format for the ``recipients`` shorthand's email destinations. "
+                "Looker requires every destination to specify a format. Defaults "
+                "to ``wysiwyg_pdf`` (Looker UI's default for dashboard email "
+                "schedules). Other common values: ``csv``, ``xlsx``, ``html``, "
+                "``json_detail``, ``assembled_pdf``. Ignored when "
+                "``destinations`` is used (set ``format`` per destination there)."
+            ),
+        ] = "wysiwyg_pdf",
         destinations: Annotated[
             list[dict[str, Any]] | None,
             (
@@ -1143,7 +1154,10 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
             if destinations is not None:
                 resolved_destinations = destinations
             elif recipients is not None:
-                resolved_destinations = [{"type": "email", "address": addr} for addr in recipients]
+                resolved_destinations = [
+                    {"type": "email", "address": addr, "format": email_format}
+                    for addr in recipients
+                ]
             if not resolved_destinations:
                 return json.dumps(
                     {
@@ -1243,6 +1257,15 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
             list[str] | None,
             "Email-only shorthand that replaces the destinations list",
         ] = None,
+        email_format: Annotated[
+            str,
+            (
+                "Format for the ``recipients`` shorthand's email destinations. "
+                "Looker requires every destination to specify a format. Defaults "
+                "to ``wysiwyg_pdf``. See ``create_schedule`` for the full list "
+                "of supported values."
+            ),
+        ] = "wysiwyg_pdf",
         destinations: Annotated[
             list[dict[str, Any]] | None,
             (
@@ -1409,7 +1432,8 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                     body["scheduled_plan_destination"] = destinations
                 elif recipients is not None:
                     body["scheduled_plan_destination"] = [
-                        {"type": "email", "address": addr} for addr in recipients
+                        {"type": "email", "address": addr, "format": email_format}
+                        for addr in recipients
                     ]
 
                 if not body:
