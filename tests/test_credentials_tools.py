@@ -280,3 +280,121 @@ class TestPathEncoding:
                 assert "99%20weird" in captured["raw_path"]
         finally:
             await client.close()
+
+
+# ── Lifecycle additions: TOTP, API3 update, email patch ─────────────────
+
+
+class TestUpdateCredentialsApi3:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_patches_purpose(self, config):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            import json as _json
+
+            captured["body"] = _json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                json={"id": "k-1", "client_id": "abc", "purpose": "ci"},
+            )
+
+        respx.patch(f"{API_URL}/users/u-1/credentials_api3/k-1").mock(side_effect=capture)
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = client.build_context(
+            "update_credentials_api3",
+            "credentials",
+            {"user_id": "u-1", "credentials_api3_id": "k-1"},
+        )
+        try:
+            async with client.session(ctx) as session:
+                await session.patch(
+                    "/users/u-1/credentials_api3/k-1",
+                    body={"purpose": "ci"},
+                )
+                assert captured["body"] == {"purpose": "ci"}
+        finally:
+            await client.close()
+
+
+class TestTotpLifecycle:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_create_posts_to_totp_endpoint(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/users/u-1/credentials_totp").mock(
+            return_value=httpx.Response(200, json={"verified": False})
+        )
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = client.build_context("create_credentials_totp", "credentials", {"user_id": "u-1"})
+        try:
+            async with client.session(ctx) as session:
+                creds = await session.post("/users/u-1/credentials_totp")
+                # User has not yet completed enrollment in their authenticator.
+                assert creds["verified"] is False
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_returns_metadata(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/users/u-1/credentials_totp").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "verified": True,
+                    "is_disabled": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+        )
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = client.build_context("get_credentials_totp", "credentials", {"user_id": "u-1"})
+        try:
+            async with client.session(ctx) as session:
+                creds = await session.get("/users/u-1/credentials_totp")
+                assert creds["verified"] is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_delete_clears_credential(self, config):
+        _mock_login_logout()
+        respx.delete(f"{API_URL}/users/u-1/credentials_totp").mock(return_value=httpx.Response(204))
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = client.build_context("delete_credentials_totp", "credentials", {"user_id": "u-1"})
+        try:
+            async with client.session(ctx) as session:
+                result = await session.delete("/users/u-1/credentials_totp")
+                assert result is None
+        finally:
+            await client.close()
+
+
+class TestCredentialsToolRegistration:
+    @pytest.mark.asyncio
+    async def test_new_lifecycle_tools_register(self, server_and_client):
+        # Lock in the lifecycle additions — a future refactor that drops one
+        # silently must trip this test.
+        mcp, _ = server_and_client
+        names = {t.name for t in await mcp.list_tools()}
+        for tool in (
+            "update_credentials_api3",
+            "get_credentials_totp",
+            "create_credentials_totp",
+            "delete_credentials_totp",
+        ):
+            assert tool in names, f"missing tool: {tool}"

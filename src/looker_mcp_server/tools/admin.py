@@ -210,13 +210,27 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
     async def create_credentials_email(
         user_id: Annotated[str, "User ID"],
         email: Annotated[str, "Email address for login"],
+        forced_password_reset_at_next_login: Annotated[
+            bool | None,
+            (
+                "Force the user to change their password on next login. Useful "
+                "when bootstrapping a user with a temporary password issued "
+                "out-of-band."
+            ),
+        ] = None,
     ) -> str:
         ctx = client.build_context("create_credentials_email", "admin", {"user_id": user_id})
         try:
             async with client.session(ctx) as session:
+                body: dict[str, Any] = {"email": email}
+                _set_if(
+                    body,
+                    "forced_password_reset_at_next_login",
+                    forced_password_reset_at_next_login,
+                )
                 creds = await session.post(
-                    f"/users/{user_id}/credentials_email",
-                    body={"email": email},
+                    f"/users/{_path_seg(user_id)}/credentials_email",
+                    body=body,
                 )
                 return json.dumps(
                     {
@@ -231,6 +245,104 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
+            "Get a user's email/password credentials metadata. Returns email, "
+            "creation timestamp, and read-only fields like ``has_password``, "
+            "``logged_in_at``, ``password_reset_url_expired``, and "
+            "``account_setup_url_expired``. The password itself is never "
+            "returned."
+        ),
+    )
+    async def get_credentials_email(
+        user_id: Annotated[str, "User ID"],
+    ) -> str:
+        ctx = client.build_context("get_credentials_email", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                creds = await session.get(f"/users/{_path_seg(user_id)}/credentials_email")
+                return json.dumps(creds, indent=2)
+        except Exception as e:
+            return format_api_error("get_credentials_email", e)
+
+    @server.tool(
+        description=(
+            "Update a user's email/password credentials. Only provided fields "
+            "are changed — omitted fields are preserved. Use ``email`` to "
+            "rename a user's login address (the User schema has no settable "
+            "``email`` field; this is the canonical path). Use "
+            "``forced_password_reset_at_next_login`` to require the user to "
+            "rotate their password the next time they sign in."
+        ),
+    )
+    async def update_credentials_email(
+        user_id: Annotated[str, "User ID"],
+        email: Annotated[str | None, "New email address for login"] = None,
+        forced_password_reset_at_next_login: Annotated[
+            bool | None,
+            "Toggle the forced-password-reset-at-next-login flag",
+        ] = None,
+    ) -> str:
+        ctx = client.build_context("update_credentials_email", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                body: dict[str, Any] = {}
+                _set_if(body, "email", email)
+                _set_if(
+                    body,
+                    "forced_password_reset_at_next_login",
+                    forced_password_reset_at_next_login,
+                )
+
+                if not body:
+                    return json.dumps(
+                        {
+                            "error": "No fields provided to update.",
+                            "hint": (
+                                "Pass at least one of: email, forced_password_reset_at_next_login."
+                            ),
+                        },
+                        indent=2,
+                    )
+
+                creds = await session.patch(
+                    f"/users/{_path_seg(user_id)}/credentials_email",
+                    body=body,
+                )
+                return json.dumps(
+                    {
+                        "user_id": user_id,
+                        "email": creds.get("email") if creds else email,
+                        "updated": True,
+                        "fields_changed": sorted(body.keys()),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_credentials_email", e)
+
+    @server.tool(
+        description=(
+            "Remove a user's email/password credentials. They will no longer "
+            "be able to log in with email + password until new credentials "
+            "are attached via ``create_credentials_email``. Does not affect "
+            "SSO credential links."
+        ),
+    )
+    async def delete_credentials_email(
+        user_id: Annotated[str, "User ID"],
+    ) -> str:
+        ctx = client.build_context("delete_credentials_email", "admin", {"user_id": user_id})
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(f"/users/{_path_seg(user_id)}/credentials_email")
+                return json.dumps(
+                    {"deleted": True, "user_id": user_id, "credential_type": "email"},
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("delete_credentials_email", e)
+
+    @server.tool(
+        description=(
             "Send a password reset or account setup email to a user. "
             "The user must already have email/password credentials attached."
         ),
@@ -242,7 +354,7 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 await session.post(
-                    f"/users/{user_id}/credentials_email/send_password_reset",
+                    f"/users/{_path_seg(user_id)}/credentials_email/send_password_reset",
                 )
                 return json.dumps(
                     {"user_id": user_id, "password_reset_sent": True},
