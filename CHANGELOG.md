@@ -100,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recipients` parameters use `is not None` semantics rather than
   truthy checks, so an explicit empty list is detected as
   "argument supplied" rather than silently dropped.
+- Both `create_schedule` and `update_schedule` now reject the
+  `crontab` + `datagroup` combination up front (the two are mutually
+  exclusive trigger modes per the WriteScheduledPlan spec). Previously
+  the request would have been forwarded to Looker, which returns a
+  less actionable error.
 
 ### Removed
 

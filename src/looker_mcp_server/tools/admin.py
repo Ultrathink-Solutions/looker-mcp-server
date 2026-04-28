@@ -1062,13 +1062,36 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
     ) -> str:
         ctx = client.build_context("create_schedule", "admin")
         try:
-            if recipients and destinations:
+            # Use ``is not None`` semantics throughout so an explicit empty list
+            # (recipients=[] or destinations=[]) is detected as "the caller
+            # named this argument" rather than "the caller omitted it." Truthy
+            # checks let recipients=[] slip past the mutual-exclusion guard,
+            # which then writes the wrong destinations block.
+            if recipients is not None and destinations is not None:
                 return json.dumps(
                     {
                         "error": "Pass either ``recipients`` or ``destinations``, not both.",
                         "hint": (
                             "``recipients`` is a shorthand that builds an email-only "
                             "destinations array — pass it OR ``destinations``."
+                        ),
+                    },
+                    indent=2,
+                )
+            # crontab and datagroup are mutually exclusive trigger modes per
+            # the WriteScheduledPlan spec ("can't be used in combination with
+            # crontab"). Reject the combination up front rather than letting
+            # Looker return a less actionable 422.
+            if crontab is not None and datagroup is not None:
+                return json.dumps(
+                    {
+                        "error": (
+                            "``crontab`` and ``datagroup`` are mutually exclusive "
+                            "trigger modes — pass exactly one."
+                        ),
+                        "hint": (
+                            "Use ``crontab`` for time-based delivery, ``datagroup`` "
+                            "for delivery on data refresh."
                         ),
                     },
                     indent=2,
@@ -1129,9 +1152,12 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 _set_if(body, "custom_url_params", custom_url_params)
                 _set_if(body, "custom_url_label", custom_url_label)
 
-                if destinations:
+                # Match update_schedule's `is not None` semantics so an
+                # explicit empty list serializes as scheduled_plan_destination=[]
+                # rather than being silently dropped.
+                if destinations is not None:
                     body["scheduled_plan_destination"] = destinations
-                elif recipients:
+                elif recipients is not None:
                     body["scheduled_plan_destination"] = [
                         {"type": "email", "address": addr} for addr in recipients
                     ]
@@ -1248,6 +1274,24 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                         "hint": (
                             "``recipients`` is a shorthand that builds an email-only "
                             "destinations array — pass it OR ``destinations``."
+                        ),
+                    },
+                    indent=2,
+                )
+            # crontab and datagroup are mutually exclusive trigger modes per
+            # the WriteScheduledPlan spec. On update either one can clear the
+            # other (the new value overrides), so reject only the case where
+            # both are explicitly provided in the same call.
+            if crontab is not None and datagroup is not None:
+                return json.dumps(
+                    {
+                        "error": (
+                            "``crontab`` and ``datagroup`` are mutually exclusive "
+                            "trigger modes — pass exactly one."
+                        ),
+                        "hint": (
+                            "Use ``crontab`` for time-based delivery, ``datagroup`` "
+                            "for delivery on data refresh."
                         ),
                     },
                     indent=2,

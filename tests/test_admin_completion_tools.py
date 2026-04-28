@@ -376,6 +376,120 @@ class TestUpdateScheduleAdvanced:
             await looker_client.close()
 
 
+class TestScheduleTriggerValidation:
+    """`crontab` and `datagroup` are mutually exclusive trigger modes per the
+    WriteScheduledPlan spec — Looker rejects requests that set both. The tool
+    catches this up front so callers see an actionable error attributing the
+    failure to the offending parameters, not a Looker 422.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_create_rejects_both_crontab_and_datagroup(self, config):
+        _mock_login_logout()
+        # No POST mock — guard must short-circuit before any HTTP.
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "x",
+                    "dashboard_id": "1",
+                    "crontab": "0 9 * * *",
+                    "datagroup": "daily_etl",
+                },
+            )()
+            assert "mutually exclusive" in payload["error"]
+            post_calls = [c for c in respx.calls if c.request.method == "POST"]
+            assert post_calls == []
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_update_rejects_both_crontab_and_datagroup(self, config):
+        _mock_login_logout()
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "update_schedule",
+                {"schedule_id": "42", "crontab": "0 9 * * *", "datagroup": "daily_etl"},
+            )()
+            assert "mutually exclusive" in payload["error"]
+            patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
+            assert patch_calls == []
+        finally:
+            await looker_client.close()
+
+
+class TestCreateScheduleEmptyListSemantics:
+    """`recipients=[]` and `destinations=[]` must be treated as "the caller
+    explicitly cleared the destination list," not as "the caller omitted
+    these arguments." Truthy checks would silently let recipients=[]
+    bypass the mutual-exclusion guard.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_empty_recipients_and_destinations_both_provided_is_rejected(self, config):
+        _mock_login_logout()
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            # With truthy checks, empty lists fall through and BOTH are
+            # accepted. With `is not None`, this is a mutual-exclusion error.
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "x",
+                    "crontab": "0 9 * * *",
+                    "dashboard_id": "1",
+                    "recipients": [],
+                    "destinations": [],
+                },
+            )()
+            assert "not both" in payload["error"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_destinations_empty_list_creates_with_no_destinations(self, config):
+        # On create, destinations=[] is unusual but legitimate — schedules
+        # without destinations are valid (test-only stubs, etc).
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(201, json={"id": "9"})
+
+        respx.post(f"{API_URL}/scheduled_plans").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "x",
+                    "crontab": "0 9 * * *",
+                    "dashboard_id": "1",
+                    "destinations": [],
+                },
+            )()
+            # The empty list is forwarded — matches update_schedule's behavior.
+            assert captured["body"]["scheduled_plan_destination"] == []
+        finally:
+            await looker_client.close()
+
+
 class TestRunScheduleOnce:
     @pytest.mark.asyncio
     @respx.mock
