@@ -1220,8 +1220,11 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
             "without rebuilding it. Returns an actionable error when no "
             "fields are supplied.\n\n"
             "Destinations: ``destinations`` and ``recipients`` are mutually "
-            "exclusive. Setting either replaces the full destination list — "
-            "passing an empty list clears all destinations."
+            "exclusive. Setting either replaces the full destination list "
+            "with the provided entries. Looker requires every ScheduledPlan "
+            "to have at least one destination, so an empty list is rejected "
+            "up front; to leave existing destinations unchanged, omit both "
+            "arguments."
         ),
     )
     async def update_schedule(
@@ -1345,6 +1348,26 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                     },
                     indent=2,
                 )
+            # Looker requires every ScheduledPlan to have at least one
+            # destination — an empty array is rejected with a 422. Catch
+            # this preflight and return an actionable error.
+            if destinations == [] or (recipients == [] and destinations is None):
+                return json.dumps(
+                    {
+                        "error": (
+                            "Empty destination list is not allowed — "
+                            "Looker requires every ScheduledPlan to have "
+                            "at least one destination."
+                        ),
+                        "hint": (
+                            "To replace destinations, pass a non-empty "
+                            "list. To leave existing destinations "
+                            "unchanged, omit both ``destinations`` and "
+                            "``recipients`` from the call."
+                        ),
+                    },
+                    indent=2,
+                )
 
             async with client.session(ctx) as session:
                 body: dict[str, Any] = {}
@@ -1377,9 +1400,11 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 _set_if(body, "custom_url_params", custom_url_params)
                 _set_if(body, "custom_url_label", custom_url_label)
 
-                # destinations / recipients use `is not None` (not `_set_if`) so an
-                # empty list is forwarded — that's how the Looker API clears
-                # all destinations.
+                # destinations / recipients use `is not None` (not
+                # `_set_if`) so a non-empty list explicitly replaces
+                # existing destinations. Omitting both leaves them
+                # untouched. (Empty-list rejection happens preflight
+                # because Looker rejects empty arrays.)
                 if destinations is not None:
                     body["scheduled_plan_destination"] = destinations
                 elif recipients is not None:

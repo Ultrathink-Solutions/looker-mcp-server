@@ -350,28 +350,23 @@ class TestCreateScheduleSurface:
 class TestUpdateScheduleAdvanced:
     @pytest.mark.asyncio
     @respx.mock
-    async def test_destinations_replace_supports_clearing(self, config):
-        # Passing destinations=[] (empty list) must reach Looker so it clears
-        # the existing destinations — _set_if would have stripped this, the
-        # tool uses `is not None` instead.
-        _mock_login_logout()
-
-        captured: dict = {}
-
-        def capture(request: httpx.Request) -> httpx.Response:
-            captured["body"] = json.loads(request.content.decode())
-            return httpx.Response(200, json={"id": "42"})
-
-        respx.patch(f"{API_URL}/scheduled_plans/42").mock(side_effect=capture)
-
+    async def test_update_rejects_empty_destinations(self, config):
+        # Looker requires every ScheduledPlan to always have at least one
+        # destination — an empty array is rejected with a 422. The tool
+        # catches this preflight and returns an actionable error instead.
+        # (Original test expected pass-through, which CodeRabbit's spec
+        # research showed is wrong — Looker rejects the request.)
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
-            await _invoke_tool(
+            payload = await _invoke_tool(
                 mcp,
                 "update_schedule",
                 {"schedule_id": "42", "destinations": []},
             )()
-            assert captured["body"] == {"scheduled_plan_destination": []}
+            assert "Empty destination list is not allowed" in payload["error"]
+            assert list(respx.calls) == [], (
+                "empty-destinations path opened a Looker session — should short-circuit preflight"
+            )
         finally:
             await looker_client.close()
 
