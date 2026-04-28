@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Git deploy-key management** for LookML projects:
+  - `get_git_deploy_key` — fetch the public SSH deploy key Looker uses
+    to authenticate to the project's git remote.
+  - `create_git_deploy_key` — generate or rotate the deploy key.
+    Returns the new public key for registration on GitHub / GitLab /
+    Bitbucket. Closes the gap on credential-rotation workflows that
+    previously required manual UI clicks per tenant.
+- **Git connection diagnostics**:
+  - `list_git_connection_tests` — enumerate available diagnostic
+    tests for a project's git remote.
+  - `run_git_connection_test` — run a single test, returning
+    pass/fail status with a human-readable failure cause. Supports
+    the `remote_url` and `use_production` query params for testing
+    remote dependencies and production credentials.
+- **Branch management**:
+  - `get_git_branch_by_name` — get a specific branch's full state
+    (ref, remote, ahead/behind, error) by name.
+  - `delete_git_branch` — delete a local branch (sweeps abandoned
+    dev branches that accumulated during iterative LookML work).
+
+### Changed
+
+- `deploy_to_production` now accepts optional `branch` and `ref`
+  query params to deploy a specific named branch or commit, matching
+  the spec for `POST /projects/{id}/deploy_ref_to_production`.
+  Omitting both preserves the previous default of deploying the
+  current dev ref.
+- **All git tools now URL-encode `project_id` and `branch_name`**
+  via the shared `_path_seg` helper, finishing the rollout
+  (previously only the new tools did). Branch names containing `/`
+  (e.g. `feature/foo`) and project ids with reserved characters now
+  route to the correct endpoint regardless of which git tool is
+  invoked.
+- **Deploy-key endpoints now use the new
+  `LookerSession.get_text` / `post_text` helpers**. Looker's
+  `/projects/{id}/git/deploy_key` returns a raw SSH public key as
+  `text/plain`, not JSON; the previous `session.get` / `session.post`
+  call path would have raised on `response.json()` in production.
+  Tests mock the response with `text=` and the correct content-type.
+
+### Internal
+
+- New `LookerSession.get_text` and `post_text` methods for endpoints
+  that return `text/plain` (currently the deploy-key endpoints; future
+  text-returning endpoints can reuse this).
+
 ## [0.13.0] - 2026-04-17
 
 ### Added
