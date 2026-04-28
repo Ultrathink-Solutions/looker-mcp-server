@@ -217,7 +217,20 @@ def register_credentials_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 creds = await session.get(f"/users/{_path_seg(user_id)}/credentials_totp")
-                return json.dumps(creds, indent=2)
+                # Curate to the documented metadata subset. Forwarding the
+                # raw payload risks contract drift and accidental
+                # overexposure (Looker may add fields without notice).
+                if not creds:
+                    return json.dumps({}, indent=2)
+                return json.dumps(
+                    {
+                        "user_id": user_id,
+                        "verified": creds.get("verified"),
+                        "is_disabled": creds.get("is_disabled"),
+                        "created_at": creds.get("created_at"),
+                    },
+                    indent=2,
+                )
         except Exception as e:
             return format_api_error("get_credentials_totp", e)
 

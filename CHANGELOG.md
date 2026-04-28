@@ -130,6 +130,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exclusive trigger modes per the WriteScheduledPlan spec). Previously
   the request would have been forwarded to Looker, which returns a
   less actionable error.
+- `get_credentials_email` and `get_credentials_totp` now return a
+  curated metadata subset matching their docstring contracts rather
+  than forwarding the raw upstream payload. This pins the MCP
+  response shape across Looker versions and prevents accidental
+  exposure of sensitive fields — most importantly the one-time
+  `password_reset_url` and `account_setup_url` tokens that Looker
+  may include in `GET /credentials_email` responses but that should
+  never round-trip through the tool surface.
 
 ### Removed
 

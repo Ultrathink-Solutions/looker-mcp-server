@@ -259,7 +259,29 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 creds = await session.get(f"/users/{_path_seg(user_id)}/credentials_email")
-                return json.dumps(creds, indent=2)
+                # Curate the response to the documented metadata subset.
+                # Forwarding the raw upstream payload would risk surfacing
+                # fields outside the contract (links, transient URLs that
+                # are technically read-only but might rotate, etc.) and
+                # makes the MCP response shape unstable across Looker
+                # versions.
+                if not creds:
+                    return json.dumps({}, indent=2)
+                return json.dumps(
+                    {
+                        "user_id": user_id,
+                        "email": creds.get("email"),
+                        "is_disabled": creds.get("is_disabled"),
+                        "forced_password_reset_at_next_login": creds.get(
+                            "forced_password_reset_at_next_login"
+                        ),
+                        "created_at": creds.get("created_at"),
+                        "logged_in_at": creds.get("logged_in_at"),
+                        "password_reset_url_expired": creds.get("password_reset_url_expired"),
+                        "account_setup_url_expired": creds.get("account_setup_url_expired"),
+                    },
+                    indent=2,
+                )
         except Exception as e:
             return format_api_error("get_credentials_email", e)
 

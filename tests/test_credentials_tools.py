@@ -1,13 +1,28 @@
 """Tests for credentials tool group — non-email user credentials."""
 
+import json as _json
+
 import httpx
 import pytest
 import respx
+from fastmcp import Client
+from mcp.types import TextContent
 
 from looker_mcp_server.client import LookerClient
 from looker_mcp_server.config import LookerConfig
 from looker_mcp_server.identity import ApiKeyIdentityProvider
 from looker_mcp_server.server import create_server
+
+
+def _invoke_tool(mcp, tool_name: str, args: dict):
+    async def _run():
+        async with Client(mcp) as mcp_client:
+            result = await mcp_client.call_tool(tool_name, args)
+            content = result.content[0]
+            assert isinstance(content, TextContent)
+            return _json.loads(content.text)
+
+    return _run
 
 
 @pytest.fixture
@@ -398,3 +413,51 @@ class TestCredentialsToolRegistration:
             "delete_credentials_totp",
         ):
             assert tool in names, f"missing tool: {tool}"
+
+
+# ── Response curating: get_credentials_totp drops out-of-contract fields ──
+
+
+class TestGetCredentialsTotpCurating:
+    """The tool docstring promises a metadata-focused response. Forwarding the
+    raw Looker payload would leak future-added fields (rotating links, can-
+    matrices, etc.) and make the MCP response shape unstable across Looker
+    versions. The curator pins the contract.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_response_drops_undocumented_fields(self, config):
+        from looker_mcp_server.server import create_server
+
+        _mock_login_logout()
+        respx.get(f"{API_URL}/users/u-1/credentials_totp").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "verified": True,
+                    "is_disabled": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    # Out-of-contract fields the upstream payload may include —
+                    # these MUST NOT appear in the MCP response.
+                    "url": "https://test.looker.com/api/4.0/users/u-1/credentials_totp",
+                    "type": "totp",
+                    "can": {"do_thing": True},
+                    "future_field_we_dont_know_about": "leak",
+                },
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"credentials"})
+        try:
+            payload = await _invoke_tool(mcp, "get_credentials_totp", {"user_id": "u-1"})()
+            # Only the documented metadata is surfaced.
+            assert payload["verified"] is True
+            assert payload["is_disabled"] is False
+            assert payload["created_at"] == "2026-01-01T00:00:00Z"
+            assert payload["user_id"] == "u-1"
+            # Undocumented fields are filtered out by the curator.
+            for leaky in ("url", "type", "can", "future_field_we_dont_know_about"):
+                assert leaky not in payload, f"{leaky} leaked into curated response"
+        finally:
+            await looker_client.close()
