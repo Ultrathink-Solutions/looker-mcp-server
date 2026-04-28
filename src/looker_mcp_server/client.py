@@ -103,6 +103,26 @@ class LookerSession:
         """POST to an endpoint that returns ``text/plain`` (deploy-key rotation)."""
         return await self._request_text("POST", path, params=params)
 
+    @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        """Raise ``LookerApiError`` with the best-available detail string.
+
+        Looker error bodies are JSON ``{"message": ..., "errors": ...}`` in
+        most cases but can be plain text for some endpoints (notably the
+        text/plain ones). Try JSON first; fall back to a 500-char text
+        truncation. Shared by both the JSON and text request paths so
+        their error parsing can never drift.
+        """
+        if response.status_code < 400:
+            return
+        detail = ""
+        try:
+            body = response.json()
+            detail = body.get("message", "") or body.get("error", "")
+        except Exception:
+            detail = response.text[:500]
+        raise LookerApiError(response.status_code, response.reason_phrase, detail)
+
     async def _request(
         self,
         method: str,
@@ -117,14 +137,7 @@ class LookerSession:
             params=params,
             json=json,
         )
-        if response.status_code >= 400:
-            detail = ""
-            try:
-                body = response.json()
-                detail = body.get("message", "") or body.get("error", "")
-            except Exception:
-                detail = response.text[:500]
-            raise LookerApiError(response.status_code, response.reason_phrase, detail)
+        self._raise_for_status(response)
 
         if response.status_code == 204 or not response.content:
             return None
@@ -142,14 +155,7 @@ class LookerSession:
             headers=self._headers,
             params=params,
         )
-        if response.status_code >= 400:
-            detail = ""
-            try:
-                body = response.json()
-                detail = body.get("message", "") or body.get("error", "")
-            except Exception:
-                detail = response.text[:500]
-            raise LookerApiError(response.status_code, response.reason_phrase, detail)
+        self._raise_for_status(response)
         return response.text
 
 
