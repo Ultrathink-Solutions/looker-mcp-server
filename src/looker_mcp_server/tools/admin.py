@@ -1121,6 +1121,42 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                     },
                     indent=2,
                 )
+            # Trigger required: a schedule with neither crontab nor datagroup
+            # has no way to fire. Reject up front rather than letting Looker
+            # 422 with a less actionable message.
+            if crontab is None and datagroup is None:
+                return json.dumps(
+                    {
+                        "error": "No trigger provided.",
+                        "hint": (
+                            "Pass either ``crontab`` (time-based) or "
+                            "``datagroup`` (data-refresh-based)."
+                        ),
+                    },
+                    indent=2,
+                )
+            # Destination required: a schedule with no destinations cannot
+            # deliver. Resolve destinations vs. recipients shorthand once and
+            # reject if the resolved list is empty (handles destinations=[]
+            # with no fallback recipients, and the both-None case).
+            resolved_destinations: list[dict[str, Any]] | None = None
+            if destinations is not None:
+                resolved_destinations = destinations
+            elif recipients is not None:
+                resolved_destinations = [{"type": "email", "address": addr} for addr in recipients]
+            if not resolved_destinations:
+                return json.dumps(
+                    {
+                        "error": "No destinations provided.",
+                        "hint": (
+                            "Pass at least one entry via ``destinations`` "
+                            "(full ScheduledPlanDestination shape) or "
+                            "``recipients`` (email shorthand). A schedule "
+                            "with no destinations cannot deliver."
+                        ),
+                    },
+                    indent=2,
+                )
 
             async with client.session(ctx) as session:
                 body: dict[str, Any] = {"name": name}
@@ -1152,15 +1188,9 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 _set_if(body, "custom_url_params", custom_url_params)
                 _set_if(body, "custom_url_label", custom_url_label)
 
-                # Match update_schedule's `is not None` semantics so an
-                # explicit empty list serializes as scheduled_plan_destination=[]
-                # rather than being silently dropped.
-                if destinations is not None:
-                    body["scheduled_plan_destination"] = destinations
-                elif recipients is not None:
-                    body["scheduled_plan_destination"] = [
-                        {"type": "email", "address": addr} for addr in recipients
-                    ]
+                # The resolved destinations list was computed and validated
+                # in the preflight above; reuse it directly.
+                body["scheduled_plan_destination"] = resolved_destinations
 
                 schedule = await session.post("/scheduled_plans", body=body)
                 return json.dumps(
@@ -1292,6 +1322,25 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                         "hint": (
                             "Use ``crontab`` for time-based delivery, ``datagroup`` "
                             "for delivery on data refresh."
+                        ),
+                    },
+                    indent=2,
+                )
+            # Mirror create_schedule's at-most-one-target guard. A schedule
+            # has exactly one source (look / dashboard / lookml_dashboard /
+            # query) — retargeting to multiple at once is ambiguous and
+            # would push an avoidable validation error to Looker.
+            update_target_count = sum(
+                1 for v in (look_id, dashboard_id, lookml_dashboard_id, query_id) if v is not None
+            )
+            if update_target_count > 1:
+                return json.dumps(
+                    {
+                        "error": "Multiple targets provided.",
+                        "hint": (
+                            "Pass at most one of look_id, dashboard_id, "
+                            "lookml_dashboard_id, query_id when retargeting an "
+                            "existing schedule."
                         ),
                     },
                     indent=2,

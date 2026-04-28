@@ -375,6 +375,24 @@ class TestUpdateScheduleAdvanced:
         finally:
             await looker_client.close()
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_update_rejects_multiple_targets(self, config):
+        # A schedule has exactly one source (look / dashboard / lookml /
+        # query). Retargeting to multiple at once is ambiguous and would
+        # 422 at Looker. Mirror create_schedule's at-most-one-target guard.
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "update_schedule",
+                {"schedule_id": "42", "look_id": "1", "dashboard_id": "2"},
+            )()
+            assert "Multiple targets" in payload["error"]
+            assert list(respx.calls) == []
+        finally:
+            await looker_client.close()
+
 
 class TestScheduleTriggerValidation:
     """`crontab` and `datagroup` are mutually exclusive trigger modes per the
@@ -459,22 +477,14 @@ class TestCreateScheduleEmptyListSemantics:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_destinations_empty_list_creates_with_no_destinations(self, config):
-        # On create, destinations=[] is unusual but legitimate — schedules
-        # without destinations are valid (test-only stubs, etc).
-        _mock_login_logout()
-
-        captured: dict = {}
-
-        def capture(request: httpx.Request) -> httpx.Response:
-            captured["body"] = json.loads(request.content.decode())
-            return httpx.Response(201, json={"id": "9"})
-
-        respx.post(f"{API_URL}/scheduled_plans").mock(side_effect=capture)
-
+    async def test_create_with_empty_destinations_is_rejected(self, config):
+        # A schedule with no destinations cannot deliver. Reject up front
+        # rather than letting Looker 422 with a less actionable message.
+        # (On UPDATE, destinations=[] stays valid — that's how you clear
+        # a previously-set destinations list.)
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
-            await _invoke_tool(
+            payload = await _invoke_tool(
                 mcp,
                 "create_schedule",
                 {
@@ -484,8 +494,48 @@ class TestCreateScheduleEmptyListSemantics:
                     "destinations": [],
                 },
             )()
-            # The empty list is forwarded — matches update_schedule's behavior.
-            assert captured["body"]["scheduled_plan_destination"] == []
+            assert "No destinations" in payload["error"]
+            # Short-circuited before any HTTP — proves the guard runs
+            # preflight rather than after burning a login round-trip.
+            assert list(respx.calls) == []
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_create_with_no_destinations_or_recipients_is_rejected(self, config):
+        # The both-None case (omitting recipients AND destinations) is
+        # equivalent to passing an empty list — same rejection path.
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {"name": "x", "crontab": "0 9 * * *", "dashboard_id": "1"},
+            )()
+            assert "No destinations" in payload["error"]
+            assert list(respx.calls) == []
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_create_with_no_trigger_is_rejected(self, config):
+        # A schedule with neither crontab nor datagroup has no way to
+        # fire. Reject up front.
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "create_schedule",
+                {
+                    "name": "x",
+                    "dashboard_id": "1",
+                    "recipients": ["a@x.com"],
+                },
+            )()
+            assert "No trigger" in payload["error"]
+            assert list(respx.calls) == []
         finally:
             await looker_client.close()
 
