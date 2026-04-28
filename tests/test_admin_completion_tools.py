@@ -1185,6 +1185,7 @@ class TestGetCredentialsEmailCurating:
                 json={
                     "email": "user@x.com",
                     "is_disabled": False,
+                    "has_password": True,
                     "forced_password_reset_at_next_login": True,
                     "created_at": "2026-01-01T00:00:00Z",
                     "logged_in_at": "2026-04-01T00:00:00Z",
@@ -1210,6 +1211,10 @@ class TestGetCredentialsEmailCurating:
             assert payload["email"] == "user@x.com"
             assert payload["forced_password_reset_at_next_login"] is True
             assert payload["password_reset_url_expired"] is True
+            # has_password — boolean flag for whether a password is set.
+            # Useful for callers verifying credential setup without making
+            # a separate call to inspect the user.
+            assert payload["has_password"] is True
             # Sensitive one-time URLs must NOT leak.
             assert "password_reset_url" not in payload
             assert "account_setup_url" not in payload

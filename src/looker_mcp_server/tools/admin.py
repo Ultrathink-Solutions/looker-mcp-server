@@ -273,6 +273,7 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                         "user_id": user_id,
                         "email": creds.get("email"),
                         "is_disabled": creds.get("is_disabled"),
+                        "has_password": creds.get("has_password"),
                         "forced_password_reset_at_next_login": creds.get(
                             "forced_password_reset_at_next_login"
                         ),

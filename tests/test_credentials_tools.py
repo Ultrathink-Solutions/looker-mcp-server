@@ -461,3 +461,31 @@ class TestGetCredentialsTotpCurating:
                 assert leaky not in payload, f"{leaky} leaked into curated response"
         finally:
             await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_empty_upstream_response_returns_consistent_shape(self, config):
+        # Locks in the consistent-response-shape contract: when Looker
+        # returns 204 / empty body (or any falsy payload), the curated
+        # response must still carry every documented key with None values
+        # rather than collapsing to {}. Agents iterating
+        # ``payload.get("verified")`` on a missing TOTP credential should
+        # not have to handle two response envelopes.
+        from looker_mcp_server.server import create_server
+
+        _mock_login_logout()
+        # 204 — no content
+        respx.get(f"{API_URL}/users/u-2/credentials_totp").mock(return_value=httpx.Response(204))
+
+        mcp, looker_client = create_server(config, enabled_groups={"credentials"})
+        try:
+            payload = await _invoke_tool(mcp, "get_credentials_totp", {"user_id": "u-2"})()
+            # Same key set as the populated case, all None except user_id.
+            assert payload == {
+                "user_id": "u-2",
+                "verified": None,
+                "is_disabled": None,
+                "created_at": None,
+            }
+        finally:
+            await looker_client.close()
