@@ -548,7 +548,15 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
             ),
         ] = None,
         # ── SSH tunnel ──────────────────────────────────────────────
-        tunnel_id: Annotated[str | None, "New SSH tunnel id (or empty string to clear)"] = None,
+        tunnel_id: Annotated[
+            str | None,
+            (
+                "New SSH tunnel id. To remove an existing tunnel binding, list "
+                "``tunnel_id`` in ``clear_fields`` (sends JSON null) — do not "
+                "pass an empty string here. Setting ``tunnel_id`` and also "
+                "listing it in ``clear_fields`` is rejected as contradictory."
+            ),
+        ] = None,
         custom_local_port: Annotated[int | None, "New SSH-tunnel local port"] = None,
         # ── BigQuery ────────────────────────────────────────────────
         bq_storage_project_id: Annotated[
