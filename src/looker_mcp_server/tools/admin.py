@@ -124,10 +124,11 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "Update a user's profile and access metadata. Group membership "
-            "is NOT settable here — use ``add_group_user`` / ``remove_group_user`` "
-            "or ``set_role_groups`` for that. Email address is also not "
-            "directly settable; update the user's email credentials object via "
-            "the credentials tool group instead."
+            "is NOT settable here — use ``add_group_user`` / "
+            "``remove_group_user`` for that (``set_role_groups`` manages "
+            "role-to-group bindings, not user membership). Email address is "
+            "also not directly settable; update the user's email credentials "
+            "object via the credentials tool group instead."
         ),
     )
     async def update_user(
@@ -152,32 +153,33 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         ] = None,
     ) -> str:
         ctx = client.build_context("update_user", "admin", {"user_id": user_id})
+        # Build and validate the body BEFORE opening a Looker session so the
+        # no-fields case short-circuits without a wasted login round-trip.
+        body: dict[str, Any] = {}
+        _set_if(body, "first_name", first_name)
+        _set_if(body, "last_name", last_name)
+        _set_if(body, "is_disabled", is_disabled)
+        _set_if(body, "role_ids", role_ids)
+        _set_if(body, "home_folder_id", home_folder_id)
+        _set_if(body, "locale", locale)
+        _set_if(body, "ui_state", ui_state)
+        _set_if(body, "models_dir_validated", models_dir_validated)
+        _set_if(body, "can_manage_api3_creds", can_manage_api3_creds)
+        if not body:
+            return json.dumps(
+                {
+                    "error": "No fields provided to update.",
+                    "hint": (
+                        "Pass at least one of: first_name, last_name, "
+                        "is_disabled, role_ids, home_folder_id, locale, "
+                        "ui_state, models_dir_validated, can_manage_api3_creds."
+                    ),
+                },
+                indent=2,
+            )
+
         try:
             async with client.session(ctx) as session:
-                body: dict[str, Any] = {}
-                _set_if(body, "first_name", first_name)
-                _set_if(body, "last_name", last_name)
-                _set_if(body, "is_disabled", is_disabled)
-                _set_if(body, "role_ids", role_ids)
-                _set_if(body, "home_folder_id", home_folder_id)
-                _set_if(body, "locale", locale)
-                _set_if(body, "ui_state", ui_state)
-                _set_if(body, "models_dir_validated", models_dir_validated)
-                _set_if(body, "can_manage_api3_creds", can_manage_api3_creds)
-
-                if not body:
-                    return json.dumps(
-                        {
-                            "error": "No fields provided to update.",
-                            "hint": (
-                                "Pass at least one of: first_name, last_name, "
-                                "is_disabled, role_ids, home_folder_id, locale, "
-                                "ui_state, models_dir_validated, can_manage_api3_creds."
-                            ),
-                        },
-                        indent=2,
-                    )
-
                 user = await session.patch(f"/users/{user_id}", body=body)
                 return json.dumps(
                     {
@@ -649,21 +651,22 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         ] = None,
     ) -> str:
         ctx = client.build_context("update_group", "admin", {"group_id": group_id})
+        # Build and validate the body BEFORE opening a Looker session so the
+        # no-fields case short-circuits without a wasted login round-trip.
+        body: dict[str, Any] = {}
+        _set_if(body, "name", name)
+        _set_if(body, "can_add_to_content_metadata", can_add_to_content_metadata)
+        if not body:
+            return json.dumps(
+                {
+                    "error": "No fields provided to update.",
+                    "hint": "Pass at least one of: name, can_add_to_content_metadata.",
+                },
+                indent=2,
+            )
+
         try:
             async with client.session(ctx) as session:
-                body: dict[str, Any] = {}
-                _set_if(body, "name", name)
-                _set_if(body, "can_add_to_content_metadata", can_add_to_content_metadata)
-
-                if not body:
-                    return json.dumps(
-                        {
-                            "error": "No fields provided to update.",
-                            "hint": "Pass at least one of: name, can_add_to_content_metadata.",
-                        },
-                        indent=2,
-                    )
-
                 group = await session.patch(f"/groups/{_path_seg(group_id)}", body=body)
                 return json.dumps(
                     {

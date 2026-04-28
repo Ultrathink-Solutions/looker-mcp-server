@@ -420,15 +420,20 @@ class TestUserSurface:
     @pytest.mark.asyncio
     @respx.mock
     async def test_update_user_no_fields_returns_actionable_error(self, config):
-        _mock_login_logout()
-        # No PATCH mock — early-return must short-circuit before HTTP.
+        # No login or PATCH mock — the short-circuit must run BEFORE a
+        # Looker session is opened, so no HTTP at all should happen.
+        # Pre-refactor the body validation lived inside `async with
+        # client.session(ctx)` and burned a wasted login round-trip on the
+        # error path.
 
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
             payload = await _invoke_tool(mcp, "update_user", {"user_id": "1"})()
             assert payload["error"] == "No fields provided to update."
-            patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
-            assert patch_calls == []
+            assert list(respx.calls) == [], (
+                "no_fields path opened a Looker session — body validation "
+                "should run before client.session()"
+            )
         finally:
             await looker_client.close()
 
@@ -485,15 +490,17 @@ class TestGroupSurface:
     @pytest.mark.asyncio
     @respx.mock
     async def test_update_group_no_fields_returns_error(self, config):
-        _mock_login_logout()
-        # No PATCH mock — early-return must short-circuit before HTTP.
+        # No login or PATCH mock — the short-circuit must run BEFORE a
+        # Looker session is opened, so no HTTP at all should happen.
 
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
             payload = await _invoke_tool(mcp, "update_group", {"group_id": "g-1"})()
             assert payload["error"] == "No fields provided to update."
-            patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
-            assert patch_calls == []
+            assert list(respx.calls) == [], (
+                "no_fields path opened a Looker session — body validation "
+                "should run before client.session()"
+            )
         finally:
             await looker_client.close()
 
