@@ -336,7 +336,9 @@ class TestUserSurface:
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
             tools = {t.name: t for t in await mcp.list_tools()}
-            props = tools["create_user"].parameters["properties"]
+            schema = tools["create_user"].parameters
+            props = schema["properties"]
+            required = set(schema.get("required", []))
             for f in (
                 "first_name",
                 "last_name",
@@ -351,6 +353,13 @@ class TestUserSurface:
                 "can_manage_api3_creds",
             ):
                 assert f in props, f"create_user missing field: {f}"
+            # email must remain OPTIONAL — SSO-only setups create users
+            # without email and let SSO link credentials on first login. A
+            # regression making email required would silently break that
+            # workflow; lock it in.
+            assert "email" not in required, (
+                "create_user.email must be optional — required-state regression"
+            )
         finally:
             await looker_client.close()
 
