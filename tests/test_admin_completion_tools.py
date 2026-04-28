@@ -437,9 +437,9 @@ class TestScheduleTriggerValidation:
     @pytest.mark.asyncio
     @respx.mock
     async def test_create_rejects_both_crontab_and_datagroup(self, config):
-        _mock_login_logout()
-        # No POST mock — guard must short-circuit before any HTTP.
-
+        # No login or HTTP mocks of any kind — the preflight guard must
+        # short-circuit before opening a Looker session, so the entire
+        # respx.calls log should stay empty.
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
             payload = await _invoke_tool(
@@ -453,16 +453,17 @@ class TestScheduleTriggerValidation:
                 },
             )()
             assert "mutually exclusive" in payload["error"]
-            post_calls = [c for c in respx.calls if c.request.method == "POST"]
-            assert post_calls == []
+            assert list(respx.calls) == [], (
+                "guard fired but a Looker session was still opened — "
+                "validation should run before client.session()"
+            )
         finally:
             await looker_client.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_update_rejects_both_crontab_and_datagroup(self, config):
-        _mock_login_logout()
-
+        # Same zero-HTTP invariant as the create-side test above.
         mcp, looker_client = create_server(config, enabled_groups={"admin"})
         try:
             payload = await _invoke_tool(
@@ -471,8 +472,10 @@ class TestScheduleTriggerValidation:
                 {"schedule_id": "42", "crontab": "0 9 * * *", "datagroup": "daily_etl"},
             )()
             assert "mutually exclusive" in payload["error"]
-            patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
-            assert patch_calls == []
+            assert list(respx.calls) == [], (
+                "guard fired but a Looker session was still opened — "
+                "validation should run before client.session()"
+            )
         finally:
             await looker_client.close()
 
