@@ -28,6 +28,70 @@ from fastmcp import FastMCP
 from ..client import LookerClient, format_api_error
 from ._helpers import _path_seg, _set_if
 
+# Single source of truth for the settable subset of Looker's DBConnection
+# schema. Used by ``update_connection`` to validate ``clear_fields`` entries
+# (so users can't ask to clear a non-existent field), and re-imported by the
+# test suite to assert the registered tool surface matches the spec.
+WRITABLE_DBCONNECTION_FIELDS: frozenset[str] = frozenset(
+    {
+        # Connection target
+        "host",
+        "port",
+        "database",
+        "schema",
+        "service_name",
+        "uses_tns",
+        "named_driver_version_requested",
+        # Auth: username/password
+        "username",
+        "password",
+        # Auth: key-pair
+        "uses_key_pair_auth",
+        "certificate",
+        "file_type",
+        # Auth: OAuth / ADC
+        "oauth_application_id",
+        "uses_application_default_credentials",
+        "impersonated_service_account",
+        # Per-user / user-attribute scoping
+        "user_db_credentials",
+        "user_attribute_fields",
+        # Pool / SSL
+        "ssl",
+        "verify_ssl",
+        "max_connections",
+        "max_queries",
+        "max_queries_per_user",
+        "pool_timeout",
+        "connection_pooling",
+        # SQL governance
+        "max_billing_gigabytes",
+        "cost_estimate_enabled",
+        "query_holding_disabled",
+        "disable_context_comment",
+        "query_timezone",
+        "db_timezone",
+        "after_connect_statements",
+        "jdbc_additional_params",
+        "sql_runner_precache_tables",
+        "sql_writing_with_info_schema",
+        # PDTs
+        "tmp_db_name",
+        "tmp_db_host",
+        "maintenance_cron",
+        "pdt_concurrency",
+        "pdt_api_control_enabled",
+        "always_retry_failed_builds",
+        "pdt_context_override",
+        # SSH tunnel
+        "tunnel_id",
+        "custom_local_port",
+        # BigQuery
+        "bq_storage_project_id",
+        "bq_roles_verified",
+    }
+)
+
 
 def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
     # ── Read ─────────────────────────────────────────────────────────
@@ -355,7 +419,15 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
             "intentionally not accepted here. ``pdts_enabled`` and ``uses_oauth`` "
             "are read-only on the API and are derived from other fields "
             "(``tmp_db_name`` + permissions, and ``oauth_application_id`` "
-            "respectively)."
+            "respectively).\n\n"
+            "Setting a parameter to its non-None value writes that value. "
+            "**Clearing** a previously-set field (so Looker reverts it to the "
+            "dialect default) requires naming it in ``clear_fields`` — that "
+            "sends an explicit JSON ``null`` for the field. Useful for fields "
+            "like ``oauth_application_id``, ``service_name``, ``tunnel_id``, "
+            "``after_connect_statements``, ``user_attribute_fields``, "
+            "``pdt_context_override``, and ``impersonated_service_account``, "
+            "which can be set, then later need to be unset."
         ),
     )
     async def update_connection(
@@ -487,6 +559,20 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
             bool | None,
             "Mark all BigQuery project roles as verified",
         ] = None,
+        # ── Explicit field clearing ─────────────────────────────────
+        clear_fields: Annotated[
+            list[str] | None,
+            (
+                "Field names to send as JSON ``null`` so Looker reverts them "
+                "to the dialect default. Set parameters above and name "
+                "additional fields here only when you need to clear "
+                "previously-set values (e.g. ``['oauth_application_id']`` to "
+                "remove an OAuth binding). Each entry must be a settable "
+                "DBConnection field; ``name`` and ``dialect_name`` cannot be "
+                "cleared. A field listed here AND set via its parameter is "
+                "rejected — that combination is contradictory."
+            ),
+        ] = None,
     ) -> str:
         ctx = client.build_context("update_connection", "connection", {"name": name})
         try:
@@ -552,12 +638,44 @@ def register_connection_tools(server: FastMCP, client: LookerClient) -> None:
                 _set_if(body, "bq_storage_project_id", bq_storage_project_id)
                 _set_if(body, "bq_roles_verified", bq_roles_verified)
 
+                # ── Explicit clearing ─────────────────────────────────
+                if clear_fields:
+                    invalid = [f for f in clear_fields if f not in WRITABLE_DBCONNECTION_FIELDS]
+                    if invalid:
+                        return json.dumps(
+                            {
+                                "error": "Invalid field name(s) in clear_fields.",
+                                "invalid": sorted(invalid),
+                                "hint": (
+                                    "Each entry must be a settable DBConnection field. "
+                                    "name/dialect_name cannot be cleared (write-once)."
+                                ),
+                            },
+                            indent=2,
+                        )
+                    conflicts = [f for f in clear_fields if f in body]
+                    if conflicts:
+                        return json.dumps(
+                            {
+                                "error": ("Cannot both set and clear the same field(s)."),
+                                "conflicts": sorted(conflicts),
+                                "hint": (
+                                    "Pass either the field's value parameter OR the "
+                                    "field name in clear_fields, not both."
+                                ),
+                            },
+                            indent=2,
+                        )
+                    for f in clear_fields:
+                        body[f] = None
+
                 if not body:
                     return json.dumps(
                         {
                             "error": "No fields provided to update.",
                             "hint": (
-                                "Pass at least one settable DBConnection field. "
+                                "Pass at least one settable DBConnection field, or use "
+                                "``clear_fields`` to null out a previously-set value. "
                                 "See the tool description for the full list."
                             ),
                         },
