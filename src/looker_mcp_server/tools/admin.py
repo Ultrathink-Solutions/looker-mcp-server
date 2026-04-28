@@ -264,9 +264,10 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 # fields outside the contract (links, transient URLs that
                 # are technically read-only but might rotate, etc.) and
                 # makes the MCP response shape unstable across Looker
-                # versions.
-                if not creds:
-                    return json.dumps({}, indent=2)
+                # versions. Always return the same response shape — when
+                # Looker returns 204/empty, callers get consistent keys
+                # with None values rather than a different envelope.
+                creds = creds or {}
                 return json.dumps(
                     {
                         "user_id": user_id,

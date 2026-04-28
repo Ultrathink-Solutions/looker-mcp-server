@@ -220,8 +220,10 @@ def register_credentials_tools(server: FastMCP, client: LookerClient) -> None:
                 # Curate to the documented metadata subset. Forwarding the
                 # raw payload risks contract drift and accidental
                 # overexposure (Looker may add fields without notice).
-                if not creds:
-                    return json.dumps({}, indent=2)
+                # Always return the same response shape — even when Looker
+                # returns 204/empty (creds is None), callers get consistent
+                # keys with None values rather than a different envelope.
+                creds = creds or {}
                 return json.dumps(
                     {
                         "user_id": user_id,
