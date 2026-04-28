@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Git deploy-key management** for LookML projects:
+  - `get_git_deploy_key` — fetch the public SSH deploy key Looker uses
+    to authenticate to the project's git remote.
+  - `create_git_deploy_key` — generate or rotate the deploy key.
+    Returns the new public key for registration on GitHub / GitLab /
+    Bitbucket. Closes the gap on credential-rotation workflows that
+    previously required manual UI clicks per tenant.
+- **Git connection diagnostics**:
+  - `list_git_connection_tests` — enumerate available diagnostic
+    tests for a project's git remote.
+  - `run_git_connection_test` — run a single test, returning
+    pass/fail status with a human-readable failure cause. Supports
+    the `remote_url` and `use_production` query params for testing
+    remote dependencies and production credentials.
+- **Branch management**:
+  - `get_git_branch_by_name` — get a specific branch's full state
+    (ref, remote, ahead/behind, error) by name.
+  - `delete_git_branch` — delete a local branch (sweeps abandoned
+    dev branches that accumulated during iterative LookML work).
+
+### Changed
+
+- `deploy_to_production` now accepts optional `branch` and `ref`
+  query params to deploy a specific named branch or commit, matching
+  the spec for `POST /projects/{id}/deploy_ref_to_production`.
+  Omitting both preserves the previous default of deploying the
+  current dev ref.
+- `delete_git_branch`, `get_git_branch_by_name`, and the deploy-key
+  / connection-test tools URL-encode `project_id` and `branch_name`
+  with the shared `_path_seg` helper, so branch names containing
+  `/` (e.g. `feature/foo`) route to the correct endpoint.
+
 ## [0.13.0] - 2026-04-17
 
 ### Added
