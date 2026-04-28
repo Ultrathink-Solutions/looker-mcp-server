@@ -36,10 +36,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the spec for `POST /projects/{id}/deploy_ref_to_production`.
   Omitting both preserves the previous default of deploying the
   current dev ref.
-- `delete_git_branch`, `get_git_branch_by_name`, and the deploy-key
-  / connection-test tools URL-encode `project_id` and `branch_name`
-  with the shared `_path_seg` helper, so branch names containing
-  `/` (e.g. `feature/foo`) route to the correct endpoint.
+- **All git tools now URL-encode `project_id` and `branch_name`**
+  via the shared `_path_seg` helper, finishing the rollout
+  (previously only the new tools did). Branch names containing `/`
+  (e.g. `feature/foo`) and project ids with reserved characters now
+  route to the correct endpoint regardless of which git tool is
+  invoked.
+- **Deploy-key endpoints now use the new
+  `LookerSession.get_text` / `post_text` helpers**. Looker's
+  `/projects/{id}/git/deploy_key` returns a raw SSH public key as
+  `text/plain`, not JSON; the previous `session.get` / `session.post`
+  call path would have raised on `response.json()` in production.
+  Tests mock the response with `text=` and the correct content-type.
+
+### Internal
+
+- New `LookerSession.get_text` and `post_text` methods for endpoints
+  that return `text/plain` (currently the deploy-key endpoints; future
+  text-returning endpoints can reuse this).
 
 ## [0.13.0] - 2026-04-17
 

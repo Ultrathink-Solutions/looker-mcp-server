@@ -81,6 +81,28 @@ class LookerSession:
     ) -> None:
         await self._request("DELETE", path, params=params)
 
+    async def get_text(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        """GET an endpoint that returns ``text/plain`` rather than JSON.
+
+        Looker's git deploy-key endpoints return a raw SSH public key as
+        plain text; calling ``.json()`` on the response would raise.
+        Mirrors ``get()``'s error-handling so 4xx/5xx still raise
+        ``LookerApiError`` with a usable detail body.
+        """
+        return await self._request_text("GET", path, params=params)
+
+    async def post_text(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        """POST to an endpoint that returns ``text/plain`` (deploy-key rotation)."""
+        return await self._request_text("POST", path, params=params)
+
     async def _request(
         self,
         method: str,
@@ -107,6 +129,28 @@ class LookerSession:
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
+
+    async def _request_text(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        response = await self._http.request(
+            method,
+            path,
+            headers=self._headers,
+            params=params,
+        )
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                body = response.json()
+                detail = body.get("message", "") or body.get("error", "")
+            except Exception:
+                detail = response.text[:500]
+            raise LookerApiError(response.status_code, response.reason_phrase, detail)
+        return response.text
 
 
 class LookerClient:

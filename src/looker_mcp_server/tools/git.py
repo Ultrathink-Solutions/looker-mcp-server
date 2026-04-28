@@ -28,7 +28,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("get_git_branch", "git", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                branch = await session.get(f"/projects/{project_id}/git_branch")
+                branch = await session.get(f"/projects/{_path_seg(project_id)}/git_branch")
                 return json.dumps(
                     {
                         "name": branch.get("name"),
@@ -56,7 +56,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("list_git_branches", "git", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                branches = await session.get(f"/projects/{project_id}/git_branches")
+                branches = await session.get(f"/projects/{_path_seg(project_id)}/git_branches")
                 result = [
                     {
                         "name": b.get("name"),
@@ -115,7 +115,9 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
                 body: dict[str, Any] = {"name": branch_name}
                 if ref:
                     body["ref"] = ref
-                branch = await session.post(f"/projects/{project_id}/git_branch", body=body)
+                branch = await session.post(
+                    f"/projects/{_path_seg(project_id)}/git_branch", body=body
+                )
                 return json.dumps(
                     {"name": branch.get("name"), "ref": branch.get("ref")},
                     indent=2,
@@ -136,7 +138,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         try:
             async with client.session(ctx) as session:
                 branch = await session.put(
-                    f"/projects/{project_id}/git_branch",
+                    f"/projects/{_path_seg(project_id)}/git_branch",
                     body={"name": branch_name},
                 )
                 return json.dumps(
@@ -235,7 +237,9 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("reset_to_production", "git", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                result = await session.post(f"/projects/{project_id}/reset_to_production")
+                result = await session.post(
+                    f"/projects/{_path_seg(project_id)}/reset_to_production"
+                )
                 return json.dumps(
                     {"reset": True, "project_id": project_id, "detail": result},
                     indent=2,
@@ -260,8 +264,11 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("get_git_deploy_key", "git", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                # Looker returns the public key as plain text, not JSON.
-                public_key = await session.get(f"/projects/{_path_seg(project_id)}/git/deploy_key")
+                # Looker returns the public key as text/plain, not JSON.
+                # Using session.get_text avoids tripping on response.json().
+                public_key = await session.get_text(
+                    f"/projects/{_path_seg(project_id)}/git/deploy_key"
+                )
                 return json.dumps(
                     {"project_id": project_id, "public_key": public_key},
                     indent=2,
@@ -285,7 +292,10 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         ctx = client.build_context("create_git_deploy_key", "git", {"project_id": project_id})
         try:
             async with client.session(ctx) as session:
-                public_key = await session.post(f"/projects/{_path_seg(project_id)}/git/deploy_key")
+                # Looker returns the rotated public key as text/plain.
+                public_key = await session.post_text(
+                    f"/projects/{_path_seg(project_id)}/git/deploy_key"
+                )
                 return json.dumps(
                     {
                         "project_id": project_id,
