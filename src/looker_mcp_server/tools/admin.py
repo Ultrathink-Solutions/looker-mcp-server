@@ -58,13 +58,47 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("get_user", e)
 
-    @server.tool(description="Create a new user in Looker.")
+    @server.tool(
+        description=(
+            "Create a new user in Looker. ``email`` populates the user's "
+            "email/password credentials object so the user can log in via "
+            "the email-auth path; for SSO-only setups create the user "
+            "without ``email`` and let SSO link credentials on first login."
+        ),
+    )
     async def create_user(
         first_name: Annotated[str, "First name"],
         last_name: Annotated[str, "Last name"],
-        email: Annotated[str, "Email address"],
+        email: Annotated[
+            str | None,
+            "Email address (also creates email/password credentials for the user)",
+        ] = None,
         role_ids: Annotated[list[int] | None, "Role IDs to assign"] = None,
         group_ids: Annotated[list[int] | None, "Group IDs to add the user to"] = None,
+        is_disabled: Annotated[
+            bool | None,
+            "Create the user in a disabled state (useful for staged rollouts)",
+        ] = None,
+        home_folder_id: Annotated[str | None, "User's home folder id"] = None,
+        locale: Annotated[
+            str | None,
+            "Preferred UI locale (e.g. 'en', 'de'). Overrides instance default.",
+        ] = None,
+        ui_state: Annotated[
+            dict[str, Any] | None,
+            "Per-user UI state dict (Looker-internal — typically left empty)",
+        ] = None,
+        models_dir_validated: Annotated[
+            bool | None,
+            "Mark the user's dev workspace as validated against production models",
+        ] = None,
+        can_manage_api3_creds: Annotated[
+            bool | None,
+            (
+                "Permit the user to self-manage their API3 credentials. May only "
+                "be assigned by Looker admins."
+            ),
+        ] = None,
     ) -> str:
         ctx = client.build_context("create_user", "admin")
         try:
@@ -72,39 +106,89 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 body: dict[str, Any] = {
                     "first_name": first_name,
                     "last_name": last_name,
-                    "email": email,
                 }
-                if role_ids:
-                    body["role_ids"] = role_ids
-                if group_ids:
-                    body["group_ids"] = group_ids
+                _set_if(body, "email", email)
+                _set_if(body, "role_ids", role_ids)
+                _set_if(body, "group_ids", group_ids)
+                _set_if(body, "is_disabled", is_disabled)
+                _set_if(body, "home_folder_id", home_folder_id)
+                _set_if(body, "locale", locale)
+                _set_if(body, "ui_state", ui_state)
+                _set_if(body, "models_dir_validated", models_dir_validated)
+                _set_if(body, "can_manage_api3_creds", can_manage_api3_creds)
                 user = await session.post("/users", body=body)
                 return json.dumps({"id": user.get("id"), "email": user.get("email")}, indent=2)
         except Exception as e:
             return format_api_error("create_user", e)
 
-    @server.tool(description="Update a user's information.")
+    @server.tool(
+        description=(
+            "Update a user's profile and access metadata. Group membership "
+            "is NOT settable here — use ``add_group_user`` / "
+            "``remove_group_user`` for that (``set_role_groups`` manages "
+            "role-to-group bindings, not user membership). Email address is "
+            "also not directly settable; update the user's email credentials "
+            "object via the credentials tool group instead."
+        ),
+    )
     async def update_user(
         user_id: Annotated[str, "User ID to update"],
         first_name: Annotated[str | None, "New first name"] = None,
         last_name: Annotated[str | None, "New last name"] = None,
         is_disabled: Annotated[bool | None, "Disable or enable the user"] = None,
         role_ids: Annotated[list[int] | None, "New role IDs"] = None,
+        home_folder_id: Annotated[str | None, "New home folder id"] = None,
+        locale: Annotated[str | None, "New preferred UI locale"] = None,
+        ui_state: Annotated[
+            dict[str, Any] | None,
+            "Replace the per-user UI state dict",
+        ] = None,
+        models_dir_validated: Annotated[
+            bool | None,
+            "Toggle the dev-workspace-validated flag",
+        ] = None,
+        can_manage_api3_creds: Annotated[
+            bool | None,
+            "Toggle self-management of API3 credentials (admin-only)",
+        ] = None,
     ) -> str:
         ctx = client.build_context("update_user", "admin", {"user_id": user_id})
+        # Build and validate the body BEFORE opening a Looker session so the
+        # no-fields case short-circuits without a wasted login round-trip.
+        body: dict[str, Any] = {}
+        _set_if(body, "first_name", first_name)
+        _set_if(body, "last_name", last_name)
+        _set_if(body, "is_disabled", is_disabled)
+        _set_if(body, "role_ids", role_ids)
+        _set_if(body, "home_folder_id", home_folder_id)
+        _set_if(body, "locale", locale)
+        _set_if(body, "ui_state", ui_state)
+        _set_if(body, "models_dir_validated", models_dir_validated)
+        _set_if(body, "can_manage_api3_creds", can_manage_api3_creds)
+        if not body:
+            return json.dumps(
+                {
+                    "error": "No fields provided to update.",
+                    "hint": (
+                        "Pass at least one of: first_name, last_name, "
+                        "is_disabled, role_ids, home_folder_id, locale, "
+                        "ui_state, models_dir_validated, can_manage_api3_creds."
+                    ),
+                },
+                indent=2,
+            )
+
         try:
             async with client.session(ctx) as session:
-                body: dict[str, Any] = {}
-                if first_name is not None:
-                    body["first_name"] = first_name
-                if last_name is not None:
-                    body["last_name"] = last_name
-                if is_disabled is not None:
-                    body["is_disabled"] = is_disabled
-                if role_ids is not None:
-                    body["role_ids"] = role_ids
                 user = await session.patch(f"/users/{user_id}", body=body)
-                return json.dumps({"id": user.get("id"), "updated": True}, indent=2)
+                return json.dumps(
+                    {
+                        "id": user.get("id"),
+                        "updated": True,
+                        "fields_changed": sorted(body.keys()),
+                    },
+                    indent=2,
+                )
         except Exception as e:
             return format_api_error("update_user", e)
 
@@ -532,17 +616,68 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(description="Create a new user group.")
     async def create_group(
         name: Annotated[str, "Group name"],
+        can_add_to_content_metadata: Annotated[
+            bool | None,
+            "Allow this group to be used in content access controls",
+        ] = None,
     ) -> str:
         ctx = client.build_context("create_group", "admin")
         try:
             async with client.session(ctx) as session:
-                group = await session.post("/groups", body={"name": name})
+                body: dict[str, Any] = {"name": name}
+                _set_if(body, "can_add_to_content_metadata", can_add_to_content_metadata)
+                group = await session.post("/groups", body=body)
                 return json.dumps(
                     {"id": group.get("id"), "name": group.get("name")},
                     indent=2,
                 )
         except Exception as e:
             return format_api_error("create_group", e)
+
+    @server.tool(
+        description=(
+            "Update a group's metadata. Only provided fields are changed; "
+            "omitted fields are preserved. Note: group *membership* is "
+            "managed via ``add_group_user`` / ``remove_group_user`` and the "
+            "group-of-groups tools, not via this update."
+        ),
+    )
+    async def update_group(
+        group_id: Annotated[str, "Group ID to update"],
+        name: Annotated[str | None, "New group name"] = None,
+        can_add_to_content_metadata: Annotated[
+            bool | None,
+            "Toggle whether the group can be used in content access controls",
+        ] = None,
+    ) -> str:
+        ctx = client.build_context("update_group", "admin", {"group_id": group_id})
+        # Build and validate the body BEFORE opening a Looker session so the
+        # no-fields case short-circuits without a wasted login round-trip.
+        body: dict[str, Any] = {}
+        _set_if(body, "name", name)
+        _set_if(body, "can_add_to_content_metadata", can_add_to_content_metadata)
+        if not body:
+            return json.dumps(
+                {
+                    "error": "No fields provided to update.",
+                    "hint": "Pass at least one of: name, can_add_to_content_metadata.",
+                },
+                indent=2,
+            )
+
+        try:
+            async with client.session(ctx) as session:
+                group = await session.patch(f"/groups/{_path_seg(group_id)}", body=body)
+                return json.dumps(
+                    {
+                        "id": group.get("id") if group else group_id,
+                        "updated": True,
+                        "fields_changed": sorted(body.keys()),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_group", e)
 
     @server.tool(description="Delete a group. This action cannot be undone.")
     async def delete_group(
@@ -555,6 +690,132 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
                 return json.dumps({"deleted": True, "group_id": group_id}, indent=2)
         except Exception as e:
             return format_api_error("delete_group", e)
+
+    # ── Group hierarchy / membership readers ─────────────────────────
+
+    @server.tool(
+        description=(
+            "List the users that are direct members of a group. Complements "
+            "``add_group_user`` / ``remove_group_user`` for visibility — "
+            "useful when auditing who has access via a group's role bindings."
+        ),
+    )
+    async def list_group_users(
+        group_id: Annotated[str, "Group ID"],
+        limit: Annotated[int, "Maximum results"] = 100,
+    ) -> str:
+        ctx = client.build_context("list_group_users", "admin", {"group_id": group_id})
+        try:
+            async with client.session(ctx) as session:
+                users = await session.get(
+                    f"/groups/{_path_seg(group_id)}/users",
+                    params={"limit": limit},
+                )
+                result = [
+                    {
+                        "id": u.get("id"),
+                        "email": u.get("email"),
+                        "first_name": u.get("first_name"),
+                        "last_name": u.get("last_name"),
+                        "is_disabled": u.get("is_disabled"),
+                    }
+                    for u in (users or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_group_users", e)
+
+    @server.tool(
+        description=(
+            "List the groups that are direct sub-groups of a parent group. "
+            "Looker supports nesting groups inside groups (group hierarchies); "
+            "this lists one level. Roles assigned to a parent group are "
+            "inherited by users in its sub-groups."
+        ),
+    )
+    async def list_group_groups(
+        group_id: Annotated[str, "Parent group ID"],
+    ) -> str:
+        ctx = client.build_context("list_group_groups", "admin", {"group_id": group_id})
+        try:
+            async with client.session(ctx) as session:
+                groups = await session.get(f"/groups/{_path_seg(group_id)}/groups")
+                result = [
+                    {
+                        "id": g.get("id"),
+                        "name": g.get("name"),
+                        "user_count": g.get("user_count"),
+                    }
+                    for g in (groups or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_group_groups", e)
+
+    @server.tool(
+        description=(
+            "Add a sub-group to a parent group. Members of the sub-group "
+            "automatically inherit any role bindings on the parent. Useful "
+            "for building role-by-team hierarchies (e.g. 'all-engineers' "
+            "contains 'data-team', 'platform-team', etc.)."
+        ),
+    )
+    async def add_group_to_group(
+        parent_group_id: Annotated[str, "Parent group ID"],
+        child_group_id: Annotated[str, "Sub-group ID to add to the parent"],
+    ) -> str:
+        ctx = client.build_context(
+            "add_group_to_group",
+            "admin",
+            {"parent_group_id": parent_group_id, "child_group_id": child_group_id},
+        )
+        try:
+            async with client.session(ctx) as session:
+                await session.post(
+                    f"/groups/{_path_seg(parent_group_id)}/groups",
+                    body={"group_id": child_group_id},
+                )
+                return json.dumps(
+                    {
+                        "added": True,
+                        "parent_group_id": parent_group_id,
+                        "child_group_id": child_group_id,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("add_group_to_group", e)
+
+    @server.tool(
+        description=(
+            "Remove a sub-group from a parent group. Inverse of "
+            "``add_group_to_group``. The sub-group itself is not deleted."
+        ),
+    )
+    async def remove_group_from_group(
+        parent_group_id: Annotated[str, "Parent group ID"],
+        child_group_id: Annotated[str, "Sub-group ID to remove from the parent"],
+    ) -> str:
+        ctx = client.build_context(
+            "remove_group_from_group",
+            "admin",
+            {"parent_group_id": parent_group_id, "child_group_id": child_group_id},
+        )
+        try:
+            async with client.session(ctx) as session:
+                await session.delete(
+                    f"/groups/{_path_seg(parent_group_id)}/groups/{_path_seg(child_group_id)}"
+                )
+                return json.dumps(
+                    {
+                        "removed": True,
+                        "parent_group_id": parent_group_id,
+                        "child_group_id": child_group_id,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("remove_group_from_group", e)
 
     # ── Role Assignments ────────────────────────────────────────────
 

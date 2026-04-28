@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (ref, remote, ahead/behind, error) by name.
   - `delete_git_branch` — delete a local branch (sweeps abandoned
     dev branches that accumulated during iterative LookML work).
+- **Full writable surface on `create_user` / `update_user`.** New
+  parameters: `home_folder_id`, `locale`, `ui_state`,
+  `models_dir_validated`, `can_manage_api3_creds`. `create_user` also
+  gains an explicit `is_disabled` parameter for staged rollouts.
+- **`update_group` tool** — previously the group surface had create
+  and delete but no update, leaving group rename / `can_add_to_content_metadata`
+  toggling unreachable.
+- `create_group` now accepts `can_add_to_content_metadata`.
+- **Group hierarchy management**:
+  - `add_group_to_group` — make one group a sub-group of another so
+    parent role bindings propagate.
+  - `remove_group_from_group` — inverse.
+  - `list_group_groups` — enumerate sub-groups under a parent.
+  - `list_group_users` — enumerate direct user members of a group
+    (visibility companion to `add_group_user` / `remove_group_user`).
 
 ### Changed
 
@@ -48,12 +63,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `text/plain`, not JSON; the previous `session.get` / `session.post`
   call path would have raised on `response.json()` in production.
   Tests mock the response with `text=` and the correct content-type.
+- `create_user`'s `email` parameter is now optional. Previously it
+  was required, which forced callers to invent an email even for
+  SSO-only setups; with this change SSO-only flows can create users
+  without email and let SSO link credentials on first login.
+- `update_user` returns an actionable error when no fields are
+  provided (matching the pattern already used by `update_schedule`),
+  rather than issuing an empty PATCH.
+
+### Removed
+
+- `update_user` no longer accepts an undocumented `email` parameter.
+  Email address is not a writable field on the User schema in Looker
+  4.0 — it is set by replacing the user's `credentials_email` object
+  via the credentials tool group.
 
 ### Internal
 
 - New `LookerSession.get_text` and `post_text` methods for endpoints
   that return `text/plain` (currently the deploy-key endpoints; future
   text-returning endpoints can reuse this).
+
 
 ## [0.13.0] - 2026-04-17
 
