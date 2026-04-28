@@ -407,17 +407,13 @@ class TestErrorFormatting:
 # ── Field-clearing semantics on update_connection ───────────────────────
 
 
-def _invoke_tool(mcp, tool_name: str, args: dict):
+async def _invoke_tool(mcp, tool_name: str, args: dict):
     """Call a tool through the MCP server and return the parsed payload."""
-
-    async def _run():
-        async with Client(mcp) as mcp_client:
-            result = await mcp_client.call_tool(tool_name, args)
-            content = result.content[0]
-            assert isinstance(content, TextContent)
-            return json.loads(content.text)
-
-    return _run
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool(tool_name, args)
+        content = result.content[0]
+        assert isinstance(content, TextContent)
+        return json.loads(content.text)
 
 
 class TestUpdateConnectionClearFields:
@@ -454,7 +450,7 @@ class TestUpdateConnectionClearFields:
                 "host": "newhost.example.com",
                 "clear_fields": ["oauth_application_id", "service_name"],
             },
-        )()
+        )
         assert payload["updated"] is True
         # The set field carries its value.
         assert captured["body"]["host"] == "newhost.example.com"
@@ -483,7 +479,7 @@ class TestUpdateConnectionClearFields:
             mcp,
             "update_connection",
             {"name": "warehouse", "clear_fields": ["not_a_field", "host"]},
-        )()
+        )
         assert "Invalid field name" in payload["error"]
         assert "not_a_field" in payload["invalid"]
         # 'host' is a valid writable field so it should NOT be flagged.
@@ -504,7 +500,7 @@ class TestUpdateConnectionClearFields:
             mcp,
             "update_connection",
             {"name": "warehouse", "host": "x.example.com", "clear_fields": ["host"]},
-        )()
+        )
         assert "Cannot both set and clear" in payload["error"]
         assert "host" in payload["conflicts"]
         patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
@@ -530,7 +526,7 @@ class TestUpdateConnectionClearFields:
             mcp,
             "update_connection",
             {"name": "warehouse", "clear_fields": ["tunnel_id"]},
-        )()
+        )
         assert payload["updated"] is True
         assert captured["body"] == {"tunnel_id": None}
 
