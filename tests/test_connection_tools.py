@@ -51,6 +51,137 @@ class TestServerRegistration:
         assert "connection" in ALL_GROUPS
 
 
+# Every writable field on the Looker DBConnection schema must be reachable
+# from the MCP tool surface. These three sets are the contract — a regression
+# (a field silently dropped on a refactor) must fail loudly here.
+WRITABLE_DBCONNECTION_FIELDS = {
+    # Connection target
+    "host",
+    "port",
+    "database",
+    "schema",
+    "service_name",
+    "uses_tns",
+    "named_driver_version_requested",
+    # Auth: username/password
+    "username",
+    "password",
+    # Auth: key-pair
+    "uses_key_pair_auth",
+    "certificate",
+    "file_type",
+    # Auth: OAuth / ADC
+    "oauth_application_id",
+    "uses_application_default_credentials",
+    "impersonated_service_account",
+    # Per-user / user-attribute scoping
+    "user_db_credentials",
+    "user_attribute_fields",
+    # Pool / SSL
+    "ssl",
+    "verify_ssl",
+    "max_connections",
+    "max_queries",
+    "max_queries_per_user",
+    "pool_timeout",
+    "connection_pooling",
+    # SQL governance
+    "max_billing_gigabytes",
+    "cost_estimate_enabled",
+    "query_holding_disabled",
+    "disable_context_comment",
+    "query_timezone",
+    "db_timezone",
+    "after_connect_statements",
+    "jdbc_additional_params",
+    "sql_runner_precache_tables",
+    "sql_writing_with_info_schema",
+    # PDTs
+    "tmp_db_name",
+    "tmp_db_host",
+    "maintenance_cron",
+    "pdt_concurrency",
+    "pdt_api_control_enabled",
+    "always_retry_failed_builds",
+    "pdt_context_override",
+    # SSH tunnel
+    "tunnel_id",
+    "custom_local_port",
+    # BigQuery
+    "bq_storage_project_id",
+    "bq_roles_verified",
+}
+
+# Fields the Looker spec marks readOnly. Sending them is a no-op on Looker's
+# side, so we must NOT advertise them as writable inputs (avoids false-success
+# user expectations like "I set pdts_enabled=true but nothing happened").
+READONLY_DBCONNECTION_FIELDS = {
+    "pdts_enabled",
+    "uses_oauth",
+    "has_password",
+    "uses_instance_oauth",
+    "uses_service_auth",
+    "snippets",
+    "managed",
+    "example",
+    "supports_data_studio_link",
+    "named_driver_version_actual",
+    "created_at",
+    "user_id",
+    "last_regen_at",
+    "last_reap_at",
+    "default_bq_connection",
+    "p4sa_name",
+}
+
+
+class TestCreateConnectionToolSchema:
+    """The MCP tool surface is the contract — verify all DBConnection writable
+    fields are reachable, and no read-only fields are mistakenly accepted as
+    inputs. The surface is what an agent sees; tests on the HTTP layer alone
+    don't catch a missing tool parameter.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_connection_exposes_all_writable_fields(self, server_and_client):
+        mcp, _ = server_and_client
+        tools = {t.name: t for t in await mcp.list_tools()}
+        assert "create_connection" in tools
+
+        props = tools["create_connection"].parameters["properties"]
+        # Required identity fields
+        assert {"name", "dialect_name"} <= props.keys()
+        # Every writable DBConnection field must be present
+        missing = WRITABLE_DBCONNECTION_FIELDS - props.keys()
+        assert not missing, f"create_connection missing writable fields: {sorted(missing)}"
+        # Read-only fields must never leak into the writable surface
+        leaked = READONLY_DBCONNECTION_FIELDS & props.keys()
+        assert not leaked, f"create_connection exposes read-only fields: {sorted(leaked)}"
+
+    @pytest.mark.asyncio
+    async def test_update_connection_exposes_all_writable_fields_except_create_only(
+        self, server_and_client
+    ):
+        mcp, _ = server_and_client
+        tools = {t.name: t for t in await mcp.list_tools()}
+        assert "update_connection" in tools
+
+        props = tools["update_connection"].parameters["properties"]
+        # name is required to address the connection in the URL path; dialect_name
+        # is write-once at create time and must not be re-settable here.
+        assert "name" in props
+        assert "dialect_name" not in props, (
+            "dialect_name is write-once at create — exposing it on update implies "
+            "it can be changed, which Looker does not support."
+        )
+        # Every writable field must be present
+        missing = WRITABLE_DBCONNECTION_FIELDS - props.keys()
+        assert not missing, f"update_connection missing writable fields: {sorted(missing)}"
+        # Read-only fields must never leak
+        leaked = READONLY_DBCONNECTION_FIELDS & props.keys()
+        assert not leaked, f"update_connection exposes read-only fields: {sorted(leaked)}"
+
+
 class TestGetConnection:
     @pytest.mark.asyncio
     @respx.mock
