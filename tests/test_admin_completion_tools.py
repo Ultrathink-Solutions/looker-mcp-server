@@ -1090,3 +1090,136 @@ class TestGroupHierarchy:
             }
         finally:
             await looker_client.close()
+
+
+# ══ Admin: email credentials lifecycle ════════════════════════════════
+
+
+class TestUpdateCredentialsEmail:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_patches_email_and_force_reset(self, config):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                json={"email": "renamed@x.com", "forced_password_reset_at_next_login": True},
+            )
+
+        respx.patch(f"{API_URL}/users/u-1/credentials_email").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "update_credentials_email",
+                {
+                    "user_id": "u-1",
+                    "email": "renamed@x.com",
+                    "forced_password_reset_at_next_login": True,
+                },
+            )()
+            assert payload["updated"] is True
+            assert captured["body"] == {
+                "email": "renamed@x.com",
+                "forced_password_reset_at_next_login": True,
+            }
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_no_fields_returns_error(self, config):
+        _mock_login_logout()
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(mcp, "update_credentials_email", {"user_id": "u-1"})()
+            assert payload["error"] == "No fields provided to update."
+            patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
+            assert patch_calls == []
+        finally:
+            await looker_client.close()
+
+
+class TestEmailCredentialRegistration:
+    @pytest.mark.asyncio
+    async def test_email_lifecycle_tools_register(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            names = {t.name for t in await mcp.list_tools()}
+            for tool in (
+                "create_credentials_email",
+                "get_credentials_email",
+                "update_credentials_email",
+                "delete_credentials_email",
+                "send_password_reset",
+            ):
+                assert tool in names, f"missing email-credential tool: {tool}"
+
+            # create_credentials_email gains forced_password_reset_at_next_login.
+            tools = {t.name: t for t in await mcp.list_tools()}
+            create_props = tools["create_credentials_email"].parameters["properties"]
+            assert "forced_password_reset_at_next_login" in create_props
+        finally:
+            await looker_client.close()
+
+
+class TestGetCredentialsEmailCurating:
+    """Forwarding the raw upstream payload would risk surfacing fields outside
+    the documented contract. The curator pins the metadata shape so the MCP
+    response stays stable across Looker versions.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_response_is_curated_to_documented_fields(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/users/u-1/credentials_email").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "email": "user@x.com",
+                    "is_disabled": False,
+                    "has_password": True,
+                    "forced_password_reset_at_next_login": True,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "logged_in_at": "2026-04-01T00:00:00Z",
+                    "password_reset_url_expired": True,
+                    "account_setup_url_expired": True,
+                    # Out-of-contract — must NOT appear in the curated response.
+                    "type": "email",
+                    "url": "https://test.looker.com/api/4.0/users/u-1/credentials_email",
+                    "user_url": "https://test.looker.com/api/4.0/users/u-1",
+                    "can": {"do_thing": True},
+                    # Looker may include the one-time-use reset URLs themselves
+                    # in the GET response — these are sensitive and must NEVER
+                    # leak through the curated tool output.
+                    "password_reset_url": "https://test.looker.com/password_reset/SECRET",
+                    "account_setup_url": "https://test.looker.com/setup/SECRET",
+                },
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"admin"})
+        try:
+            payload = await _invoke_tool(mcp, "get_credentials_email", {"user_id": "u-1"})()
+            assert payload["email"] == "user@x.com"
+            assert payload["forced_password_reset_at_next_login"] is True
+            assert payload["password_reset_url_expired"] is True
+            # has_password — boolean flag for whether a password is set.
+            # Useful for callers verifying credential setup without making
+            # a separate call to inspect the user.
+            assert payload["has_password"] is True
+            # Sensitive one-time URLs must NOT leak.
+            assert "password_reset_url" not in payload
+            assert "account_setup_url" not in payload
+            # Out-of-contract metadata must NOT leak.
+            for leaky in ("type", "url", "user_url", "can"):
+                assert leaky not in payload, f"{leaky} leaked into curated response"
+        finally:
+            await looker_client.close()

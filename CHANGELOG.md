@@ -65,6 +65,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Branded URLs**: `show_custom_url`, `custom_url_base`,
     `custom_url_params`, `custom_url_label`.
   - **Filters**: `filters_string`.
+- **Email-credential lifecycle** (admin group):
+  - `get_credentials_email` — read email-credential metadata
+    (timestamps, password-reset URL state, `has_password`).
+  - `update_credentials_email` — PATCH the credentials object to
+    rename the user's login email or set
+    `forced_password_reset_at_next_login`. Email is the canonical
+    rename path because the User schema has no settable `email`
+    field.
+  - `delete_credentials_email` — remove the email/password
+    credential link entirely.
+  - `create_credentials_email` now accepts
+    `forced_password_reset_at_next_login` for bootstrapping users
+    with temporary passwords issued out-of-band.
+- **TOTP (two-factor) lifecycle** (credentials group):
+  - `get_credentials_totp` — read TOTP enrollment state
+    (`verified`, `is_disabled`, `created_at`).
+  - `create_credentials_totp` — enroll a user in TOTP. The user
+    completes verification with their authenticator app on next
+    sign-in.
+  - `delete_credentials_totp` — clear TOTP enrollment so a user
+    can re-enroll with a new device.
+- **API3 metadata update** (credentials group):
+  - `update_credentials_api3` — PATCH an API3 credential pair to
+    set its `purpose` field (free-form description used to identify
+    what an API key is for during audits).
 
 ### Changed
 
@@ -105,6 +130,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exclusive trigger modes per the WriteScheduledPlan spec). Previously
   the request would have been forwarded to Looker, which returns a
   less actionable error.
+- `get_credentials_email` and `get_credentials_totp` now return a
+  curated metadata subset matching their docstring contracts rather
+  than forwarding the raw upstream payload. This pins the MCP
+  response shape across Looker versions and prevents accidental
+  exposure of sensitive fields — most importantly the one-time
+  `password_reset_url` and `account_setup_url` tokens that Looker
+  may include in `GET /credentials_email` responses but that should
+  never round-trip through the tool surface.
 
 ### Removed
 
