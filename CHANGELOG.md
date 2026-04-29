@@ -91,6 +91,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     set its `purpose` field (free-form description used to identify
     what an API key is for during audits).
 
+- **Full `DBConnection` field surface on `create_connection` and
+  `update_connection`.** The connection-management tools now expose every
+  writable field of Looker's `DBConnection` schema, so connections can be
+  configured end-to-end from an MCP client without falling back to the
+  Looker admin UI. New fields include:
+  - **Key-pair authentication** (Snowflake, BigQuery service-account
+    keys): `uses_key_pair_auth`, `certificate` (write-only, base64), and
+    `file_type` (`.json` / `.p8` / `.p12`).
+  - **OAuth / Application Default Credentials**:
+    `oauth_application_id`, `uses_application_default_credentials`,
+    `impersonated_service_account`.
+  - **Per-user / user-attribute scoping**: `user_db_credentials` and
+    `user_attribute_fields` — the explicit allowlist of connection
+    fields that draw their values from Looker user attributes at query
+    time.
+  - **SSH tunneling**: `tunnel_id`, `custom_local_port`.
+  - **Oracle TNS**: `uses_tns`, `service_name`.
+  - **PDT controls**: `tmp_db_host`, `pdt_concurrency`,
+    `pdt_api_control_enabled`, `always_retry_failed_builds`,
+    `maintenance_cron`, and `pdt_context_override` (the
+    `DBConnectionOverride` block, accepted as a pass-through dict so
+    PDT builds can run against a separate write-capable role).
+  - **SQL governance**: `max_queries`, `max_queries_per_user`,
+    `max_billing_gigabytes` (BigQuery), `cost_estimate_enabled`,
+    `query_holding_disabled`, `disable_context_comment`,
+    `query_timezone`, `db_timezone`, `after_connect_statements`,
+    `connection_pooling`, `sql_runner_precache_tables`,
+    `sql_writing_with_info_schema`.
+  - **JDBC**: `named_driver_version_requested`.
+  - **BigQuery**: `bq_storage_project_id`, `bq_roles_verified`.
+
+- **MCP-tool-schema regression tests.** The connection test suite now
+  asserts the registered tool's input schema against the canonical set
+  of writable `DBConnection` fields, catching silent drops on future
+  refactors.
+
+- **Field-clearing escape hatch on `update_connection`.** New
+  `clear_fields: list[str]` parameter explicitly nulls a previously-set
+  field on the wire (`oauth_application_id`, `service_name`,
+  `tunnel_id`, `after_connect_statements`, `user_attribute_fields`,
+  `pdt_context_override`, `impersonated_service_account`, etc.). The
+  prior `_set_if`-based body builder dropped explicit `None`, so
+  callers had no way to revert a field to its dialect default.
+  Validates entries against the canonical writable-field set and
+  refuses the `set + clear same field` contradiction.
+  `WRITABLE_DBCONNECTION_FIELDS` is exported as a single source of
+  truth shared by the runtime validator and the regression tests.
+
 ### Changed
 
 - `deploy_to_production` now accepts optional `branch` and `ref`
@@ -138,6 +186,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `password_reset_url` and `account_setup_url` tokens that Looker
   may include in `GET /credentials_email` responses but that should
   never round-trip through the tool surface.
+- `get_connection`'s description now enumerates the read-only metadata
+  it surfaces (`pdts_enabled`, `uses_oauth`, `managed`, `last_regen_at`,
+  …) so callers know they can read these fields even though they are
+  not settable.
 
 ### Removed
 
@@ -145,6 +197,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Email address is not a writable field on the User schema in Looker
   4.0 — it is set by replacing the user's `credentials_email` object
   via the credentials tool group.
+- `pdts_enabled` and `uses_oauth` are no longer accepted as
+  `create_connection` / `update_connection` parameters. Both fields are
+  marked `readOnly` on the Looker 4.0 spec — sending them was silently
+  ignored by the API. PDTs are enabled implicitly by setting
+  `tmp_db_name` and granting the appropriate database permissions;
+  OAuth is enabled by setting `oauth_application_id`.
 
 ### Internal
 

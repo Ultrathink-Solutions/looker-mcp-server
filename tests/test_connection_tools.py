@@ -5,11 +5,14 @@ import json
 import httpx
 import pytest
 import respx
+from fastmcp import Client
+from mcp.types import TextContent
 
 from looker_mcp_server.client import LookerApiError, LookerClient, format_api_error
 from looker_mcp_server.config import LookerConfig
 from looker_mcp_server.identity import ApiKeyIdentityProvider
 from looker_mcp_server.server import create_server
+from looker_mcp_server.tools.connection import WRITABLE_DBCONNECTION_FIELDS
 
 
 @pytest.fixture
@@ -49,6 +52,87 @@ class TestServerRegistration:
         from looker_mcp_server.config import ALL_GROUPS
 
         assert "connection" in ALL_GROUPS
+
+
+# WRITABLE_DBCONNECTION_FIELDS is imported from
+# ``looker_mcp_server.tools.connection`` — a single source of truth so the
+# runtime ``clear_fields`` validator and the schema-contract tests can never
+# drift. A regression (a field silently dropped on a refactor) must fail
+# loudly in the tests below.
+
+# Fields the Looker spec marks readOnly. Sending them is a no-op on Looker's
+# side, so we must NOT advertise them as writable inputs (avoids false-success
+# user expectations like "I set pdts_enabled=true but nothing happened").
+READONLY_DBCONNECTION_FIELDS = {
+    "pdts_enabled",
+    "uses_oauth",
+    "has_password",
+    "uses_instance_oauth",
+    "uses_service_auth",
+    "snippets",
+    "managed",
+    "example",
+    "supports_data_studio_link",
+    "named_driver_version_actual",
+    "created_at",
+    "user_id",
+    "last_regen_at",
+    "last_reap_at",
+    "default_bq_connection",
+    "p4sa_name",
+}
+
+
+class TestCreateConnectionToolSchema:
+    """The MCP tool surface is the contract — verify all DBConnection writable
+    fields are reachable, and no read-only fields are mistakenly accepted as
+    inputs. The surface is what an agent sees; tests on the HTTP layer alone
+    don't catch a missing tool parameter.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_connection_exposes_exact_writable_fields(self, server_and_client):
+        # Exact-equality assertion: a refactor that *adds* an unexpected param
+        # (typo, leaked internal, mistake) must fail just as loudly as a
+        # refactor that drops a documented one.
+        mcp, _ = server_and_client
+        tools = {t.name: t for t in await mcp.list_tools()}
+        assert "create_connection" in tools
+
+        props = tools["create_connection"].parameters["properties"]
+        expected = WRITABLE_DBCONNECTION_FIELDS | {"name", "dialect_name"}
+        assert props.keys() == expected, (
+            f"create_connection surface drift — "
+            f"missing: {sorted(expected - props.keys())}, "
+            f"unexpected: {sorted(props.keys() - expected)}"
+        )
+        # Read-only fields must never leak (subsumed by the exact-equality
+        # check above, but kept as a more readable failure message).
+        leaked = READONLY_DBCONNECTION_FIELDS & props.keys()
+        assert not leaked, f"create_connection exposes read-only fields: {sorted(leaked)}"
+
+    @pytest.mark.asyncio
+    async def test_update_connection_exposes_exact_writable_fields(self, server_and_client):
+        mcp, _ = server_and_client
+        tools = {t.name: t for t in await mcp.list_tools()}
+        assert "update_connection" in tools
+
+        props = tools["update_connection"].parameters["properties"]
+        # update has: name (URL key) + every writable field + clear_fields
+        # (the field-clearing escape hatch for nulling previously-set values).
+        # No dialect_name — it's write-once at create.
+        expected = WRITABLE_DBCONNECTION_FIELDS | {"name", "clear_fields"}
+        assert props.keys() == expected, (
+            f"update_connection surface drift — "
+            f"missing: {sorted(expected - props.keys())}, "
+            f"unexpected: {sorted(props.keys() - expected)}"
+        )
+        assert "dialect_name" not in props, (
+            "dialect_name is write-once at create — exposing it on update implies "
+            "it can be changed, which Looker does not support."
+        )
+        leaked = READONLY_DBCONNECTION_FIELDS & props.keys()
+        assert not leaked, f"update_connection exposes read-only fields: {sorted(leaked)}"
 
 
 class TestGetConnection:
@@ -318,3 +402,139 @@ class TestErrorFormatting:
         result = json.loads(format_api_error("create_connection", error))
         assert result["status"] == 400
         assert "invalid" in result["error"].lower()
+
+
+# ── Field-clearing semantics on update_connection ───────────────────────
+
+
+async def _invoke_tool(mcp, tool_name: str, args: dict):
+    """Call a tool through the MCP server and return the parsed payload."""
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool(tool_name, args)
+        content = result.content[0]
+        assert isinstance(content, TextContent)
+        return json.loads(content.text)
+
+
+class TestUpdateConnectionClearFields:
+    """The `_set_if` helper drops `None`, which means a plain
+    update_connection(host=None) call is "no-op" rather than "clear host."
+    `clear_fields` is the explicit escape hatch that puts a JSON `null` on
+    the wire so Looker reverts the field to its dialect default. Without
+    this, agents have no way to undo a previously-set oauth_application_id
+    / service_name / tunnel_id / etc.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_clear_fields_serialize_as_json_null(self, server_and_client):
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            # Use the raw bytes so we can verify `null` survives serialization
+            # (json.loads decodes it back to Python None, which is the wire shape).
+            captured["body_bytes"] = request.content.decode()
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"name": "warehouse"})
+
+        respx.patch(f"{API_URL}/connections/warehouse").mock(side_effect=capture)
+
+        mcp, _ = server_and_client
+        payload = await _invoke_tool(
+            mcp,
+            "update_connection",
+            {
+                "name": "warehouse",
+                "host": "newhost.example.com",
+                "clear_fields": ["oauth_application_id", "service_name"],
+            },
+        )
+        assert payload["updated"] is True
+        # The set field carries its value.
+        assert captured["body"]["host"] == "newhost.example.com"
+        # Cleared fields are present in the body as JSON null (not absent).
+        assert captured["body"]["oauth_application_id"] is None
+        assert captured["body"]["service_name"] is None
+        # Confirm null is on the wire — guards against silent stripping by
+        # any future serialization layer. (httpx serializes JSON compactly,
+        # so no space between key and value.)
+        assert '"oauth_application_id":null' in captured["body_bytes"]
+        # fields_changed in the response covers both set and cleared keys.
+        assert "oauth_application_id" in payload["fields_changed"]
+        assert "service_name" in payload["fields_changed"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_clear_fields_rejects_unknown_field(self, server_and_client):
+        # Catches typos before they reach Looker (which would 400 with a less
+        # actionable message). The error includes the offending names so the
+        # caller can see what to fix.
+        _mock_login_logout()
+        # No PATCH mock — validation must short-circuit before any PATCH.
+
+        mcp, _ = server_and_client
+        payload = await _invoke_tool(
+            mcp,
+            "update_connection",
+            {"name": "warehouse", "clear_fields": ["not_a_field", "host"]},
+        )
+        assert "Invalid field name" in payload["error"]
+        assert "not_a_field" in payload["invalid"]
+        # 'host' is a valid writable field so it should NOT be flagged.
+        assert "host" not in payload["invalid"]
+        patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
+        assert patch_calls == []
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_clear_fields_rejects_set_and_clear_conflict(self, server_and_client):
+        # Setting host="x" AND asking to clear "host" is contradictory — the
+        # tool returns an actionable error rather than picking one and
+        # silently doing the wrong thing.
+        _mock_login_logout()
+
+        mcp, _ = server_and_client
+        payload = await _invoke_tool(
+            mcp,
+            "update_connection",
+            {"name": "warehouse", "host": "x.example.com", "clear_fields": ["host"]},
+        )
+        assert "Cannot both set and clear" in payload["error"]
+        assert "host" in payload["conflicts"]
+        patch_calls = [c for c in respx.calls if c.request.method == "PATCH"]
+        assert patch_calls == []
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_clear_fields_alone_is_a_valid_update(self, server_and_client):
+        # An update that ONLY clears (no value parameters set) is still a
+        # legitimate operation — must NOT trip the "no fields" guard.
+        _mock_login_logout()
+
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"name": "warehouse"})
+
+        respx.patch(f"{API_URL}/connections/warehouse").mock(side_effect=capture)
+
+        mcp, _ = server_and_client
+        payload = await _invoke_tool(
+            mcp,
+            "update_connection",
+            {"name": "warehouse", "clear_fields": ["tunnel_id"]},
+        )
+        assert payload["updated"] is True
+        assert captured["body"] == {"tunnel_id": None}
+
+    def test_writable_fields_constant_matches_test_expectation(self):
+        # If the source-of-truth set drifts, the test contract drifts with it.
+        # This guard makes the drift explicit.
+        assert "oauth_application_id" in WRITABLE_DBCONNECTION_FIELDS
+        assert "name" not in WRITABLE_DBCONNECTION_FIELDS  # write-once, URL key
+        assert "dialect_name" not in WRITABLE_DBCONNECTION_FIELDS  # write-once
+        assert "pdts_enabled" not in WRITABLE_DBCONNECTION_FIELDS  # readOnly
+        assert "uses_oauth" not in WRITABLE_DBCONNECTION_FIELDS  # readOnly
