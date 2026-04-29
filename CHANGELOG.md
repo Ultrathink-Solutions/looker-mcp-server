@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-04-28
+
+This release adds end-to-end agentic management of Looker installations:
+every writable field on `DBConnection`, `WriteScheduledPlan`, and the user
+schemas is now reachable; the git, scheduling, and credential lifecycles
+are fully covered with deploy-key rotation, connection diagnostics,
+delegated ownership, conditional delivery, and TOTP enrollment. Every
+tool that builds a request body validates preflight (multiple-target
+guards, mutual-exclusion guards, required-field guards) so misconfigured
+calls return actionable errors instead of opaque Looker 422s.
+
 ### Added
 
 - **Git deploy-key management** for LookML projects:
