@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-05-07
+
+This release adds **per-call admin impersonation** to the git tool
+group. The eight workspace-scoped git tools accept an optional
+`act_as_user` argument (numeric Looker user ID or email) that scopes
+the call to a sudo session targeting that user — closing the
+per-user dev-workspace cleanup gap that previously forced operators
+to leave the MCP for raw HTTP. Argument-driven sudo is gated by
+`LOOKER_SUDO_AS_USER` and refuses with a clear validation error
+when sudo is disabled, so the kill switch remains the single control
+point for sudo-capable behavior. Argument-driven impersonation emits
+a distinct INFO-level audit event (`looker.audit.act_as_user`) so
+downstream pipelines can scope on admin per-call sudo independently
+of header-driven gateway sudo.
+
+### Added
+
+- **Per-call admin impersonation via `act_as_user`** on every git
+  workspace-scoped tool: `get_git_branch`, `list_git_branches`,
+  `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`,
+  `delete_git_branch`, `deploy_to_production`, `reset_to_production`.
+  Looker dev mode is per-user-isolated, so admin cleanup of another
+  user's stuck dev-workspace state previously required leaving the MCP
+  for raw HTTP. The new argument accepts either a numeric Looker user ID
+  or an email address (resolved via Looker's user-search API) and
+  scopes the call to a sudo session targeting that user. Gated by
+  `LOOKER_SUDO_AS_USER` — that flag is the single kill switch for
+  sudo-capable behavior, and `act_as_user` respects it: passing the
+  argument with sudo disabled raises a validation error rather than
+  silently running the call under the configured identity. The
+  argument is validated up front (must be all-digits or contain `@`)
+  so malformed input fails before reaching Looker. Capability is
+  enforced server-side by Looker — `login_user` returns 403 if the
+  configured admin credentials cannot impersonate, and the MCP
+  surfaces the failure as a clean tool error. Email-lookup misses
+  raise rather than silently falling back to the configured identity,
+  so a typo'd email cannot run an action under the wrong user. See
+  *Per-Call Admin Impersonation* in the README for the full security
+  model and audit-log shape.
+- **`ArgumentSudoIdentityProvider`** in `looker_mcp_server.identity` —
+  wraps any inner `IdentityProvider` and reads `act_as_user` from
+  `RequestContext.arguments`. Wired automatically when the server is
+  constructed with default credentials; caller-supplied identity
+  providers are left untouched.
+- **`triggered_by` field on `LookerIdentity`** — discriminates
+  argument-driven sudo (`"argument"`) from gateway/header-driven sudo
+  (`"header"`) so audit consumers can tell admin per-call impersonation
+  from automatic gateway routing.
+- **`looker.audit.act_as_user` structlog event** — emitted at INFO
+  level on every argument-driven sudo with `tool`, `target_user_id`,
+  `target_user_email`, `triggered_by`, and `configured_user`. Distinct
+  from the existing trace-level `looker.session.sudo` debug line so
+  downstream pipelines can scope on audit-only events.
+
 ## [0.14.0] - 2026-04-28
 
 This release adds end-to-end agentic management of Looker installations:

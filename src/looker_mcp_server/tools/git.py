@@ -17,6 +17,21 @@ from fastmcp import FastMCP
 from ..client import LookerClient, format_api_error
 from ._helpers import _path_seg
 
+# Per-call admin impersonation. The MCP forwards capability — Looker
+# enforces whether the configured admin credentials may impersonate
+# (HTTP 403 if not). Email values are resolved via Looker's user-search
+# API; numeric values are used directly. ``ArgumentSudoIdentityProvider``
+# in :mod:`..identity` notices this argument and rewrites the resolved
+# identity to a sudo session targeting ``act_as_user``.
+ACT_AS_USER_DESCRIPTION = (
+    "Optional Looker user ID or email to impersonate for this call. "
+    "Use to clean up another user's dev workspace (Looker dev mode is "
+    "per-user-isolated). Requires sudo capability on the configured "
+    "admin credentials. When omitted, the call uses the configured or "
+    "gateway-provided identity."
+)
+ActAsUser = Annotated[str | None, ACT_AS_USER_DESCRIPTION]
+
 
 def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
@@ -24,8 +39,13 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     )
     async def get_git_branch(
         project_id: Annotated[str, "LookML project ID"],
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("get_git_branch", "git", {"project_id": project_id})
+        ctx = client.build_context(
+            "get_git_branch",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
         try:
             async with client.session(ctx) as session:
                 branch = await session.get(f"/projects/{_path_seg(project_id)}/git_branch")
@@ -52,8 +72,13 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     )
     async def list_git_branches(
         project_id: Annotated[str, "LookML project ID"],
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("list_git_branches", "git", {"project_id": project_id})
+        ctx = client.build_context(
+            "list_git_branches",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
         try:
             async with client.session(ctx) as session:
                 branches = await session.get(f"/projects/{_path_seg(project_id)}/git_branches")
@@ -83,11 +108,16 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     async def get_git_branch_by_name(
         project_id: Annotated[str, "LookML project ID"],
         branch_name: Annotated[str, "Name of the branch to inspect"],
+        act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
             "get_git_branch_by_name",
             "git",
-            {"project_id": project_id, "branch_name": branch_name},
+            {
+                "project_id": project_id,
+                "branch_name": branch_name,
+                "act_as_user": act_as_user,
+            },
         )
         try:
             async with client.session(ctx) as session:
@@ -108,8 +138,13 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         project_id: Annotated[str, "LookML project ID"],
         branch_name: Annotated[str, "Name for the new branch"],
         ref: Annotated[str | None, "Git ref to branch from (default: current HEAD)"] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("create_git_branch", "git", {"project_id": project_id})
+        ctx = client.build_context(
+            "create_git_branch",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
         try:
             async with client.session(ctx) as session:
                 body: dict[str, Any] = {"name": branch_name}
@@ -133,8 +168,13 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     async def switch_git_branch(
         project_id: Annotated[str, "LookML project ID"],
         branch_name: Annotated[str, "Name of the branch to switch to"],
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("switch_git_branch", "git", {"project_id": project_id})
+        ctx = client.build_context(
+            "switch_git_branch",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
         try:
             async with client.session(ctx) as session:
                 branch = await session.put(
@@ -163,11 +203,16 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     async def delete_git_branch(
         project_id: Annotated[str, "LookML project ID"],
         branch_name: Annotated[str, "Name of the branch to delete"],
+        act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
             "delete_git_branch",
             "git",
-            {"project_id": project_id, "branch_name": branch_name},
+            {
+                "project_id": project_id,
+                "branch_name": branch_name,
+                "act_as_user": act_as_user,
+            },
         )
         try:
             async with client.session(ctx) as session:
@@ -199,8 +244,13 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
             str | None,
             "Specific commit ref to deploy (mutually informative with ``branch``)",
         ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("deploy_to_production", "git", {"project_id": project_id})
+        ctx = client.build_context(
+            "deploy_to_production",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
         try:
             async with client.session(ctx) as session:
                 params: dict[str, Any] = {}
@@ -233,8 +283,13 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     )
     async def reset_to_production(
         project_id: Annotated[str, "LookML project ID to reset"],
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("reset_to_production", "git", {"project_id": project_id})
+        ctx = client.build_context(
+            "reset_to_production",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
         try:
             async with client.session(ctx) as session:
                 result = await session.post(

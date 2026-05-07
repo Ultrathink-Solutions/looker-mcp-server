@@ -12,6 +12,7 @@ from .client import LookerClient
 from .config import ALL_GROUPS, DEFAULT_GROUPS, LookerConfig, LookerMcpMode
 from .identity import (
     ApiKeyIdentityProvider,
+    ArgumentSudoIdentityProvider,
     DualModeIdentityProvider,
     IdentityProvider,
 )
@@ -78,7 +79,13 @@ def create_server(
     identity_provider:
         Pluggable identity resolution.  Defaults to ``DualModeIdentityProvider``
         (uses sudo on self-hosted, OAuth on GC core) when ``sudo_as_user`` is
-        enabled, otherwise ``ApiKeyIdentityProvider``.
+        enabled, otherwise ``ApiKeyIdentityProvider``.  When ``sudo_as_user``
+        is enabled and admin credentials are configured, the resolved
+        provider is additionally wrapped in ``ArgumentSudoIdentityProvider``
+        so tools that accept ``act_as_user`` can perform per-call admin
+        impersonation. ``LOOKER_SUDO_AS_USER=false`` disables both
+        header-driven and argument-driven sudo. A caller-supplied
+        provider is left untouched.
     enabled_groups:
         Set of tool group names to enable.  Defaults to ``DEFAULT_GROUPS``.
     auth:
@@ -90,27 +97,50 @@ def create_server(
         The configured server and the client (caller manages client lifecycle).
     """
     # ── Identity provider ────────────────────────────────────────────
+    caller_provided_provider = identity_provider is not None
+
     if identity_provider is None:
         if config.sudo_as_user and config.client_id and config.client_secret:
-            provider = DualModeIdentityProvider(
+            identity_provider = DualModeIdentityProvider(
                 client_id=config.client_id,
                 client_secret=config.client_secret,
                 deployment_type=config.deployment_type,
                 user_email_header=config.user_email_header,
                 user_token_header=config.user_token_header,
             )
-            identity_provider = provider
         else:
             identity_provider = ApiKeyIdentityProvider(
                 config.client_id,
                 config.client_secret,
             )
 
+        # Wrap with argument-driven sudo so tools that accept ``act_as_user``
+        # can perform per-call admin impersonation. Gated by
+        # ``LOOKER_SUDO_AS_USER`` — that flag is the single kill switch
+        # for sudo-capable behavior, and per-call sudo respects it.
+        # The wrapper is still installed when sudo is disabled so the
+        # request fails *loudly* with a clear validation error instead
+        # of silently routing the call under the configured identity
+        # (the latter would be a footgun: an operator disabling sudo
+        # would then see ``act_as_user`` calls succeed as the wrong
+        # user). Transparent when ``act_as_user`` is absent; skipped
+        # entirely for caller-supplied providers (caller owns auth chain).
+        if config.client_id and config.client_secret:
+            identity_provider = ArgumentSudoIdentityProvider(
+                inner=identity_provider,
+                client_id=config.client_id,
+                client_secret=config.client_secret,
+                sudo_enabled=config.sudo_as_user,
+            )
+
     client = LookerClient(config, identity_provider)
 
     # Wire the user-lookup function for sudo after the client is ready.
-    if isinstance(identity_provider, DualModeIdentityProvider):
-        identity_provider.set_user_lookup(client.lookup_user_by_email)
+    # ``ArgumentSudoIdentityProvider.set_user_lookup`` propagates to its
+    # inner provider, so a single call wires the full chain when the
+    # default factory wraps a ``DualModeIdentityProvider``.
+    if not caller_provided_provider and hasattr(identity_provider, "set_user_lookup"):
+        identity_provider.set_user_lookup(client.lookup_user_by_email)  # type: ignore[attr-defined]
 
     # ── FastMCP server ───────────────────────────────────────────────
     mcp = FastMCP(

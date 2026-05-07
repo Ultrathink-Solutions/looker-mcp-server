@@ -11,6 +11,7 @@ import json
 import httpx
 import pytest
 import respx
+import structlog
 from fastmcp import Client
 from mcp.types import TextContent
 
@@ -20,6 +21,26 @@ from looker_mcp_server.server import create_server
 
 @pytest.fixture
 def config():
+    # ``sudo_as_user=True`` is the default for any deployment configured
+    # with admin credentials, and is also the gate for ``act_as_user``.
+    # Tests in TestActAsUser require the wrapper to be installed; tests
+    # that don't pass ``act_as_user`` are unaffected — with no email
+    # header and no argument, the wrapper falls through to its inner
+    # provider which falls through to api_key behavior.
+    return LookerConfig(
+        base_url="https://test.looker.com",
+        client_id="test-id",
+        client_secret="test-secret",
+        sudo_as_user=True,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+
+@pytest.fixture
+def config_sudo_disabled():
+    # Used to verify the gate: ``act_as_user`` must fail loudly when
+    # the operator has explicitly disabled sudo, not silently route the
+    # call under the configured identity.
     return LookerConfig(
         base_url="https://test.looker.com",
         client_id="test-id",
@@ -350,6 +371,257 @@ class TestGitConnectionTest:
                 },
                 {"id": "test_2", "description": "Second test."},
             ]
+        finally:
+            await looker_client.close()
+
+
+class TestActAsUser:
+    """Per-call admin impersonation via ``act_as_user``.
+
+    These tests pin the integrated behavior of
+    ``ArgumentSudoIdentityProvider`` + ``LookerClient.session()`` — when a
+    git tool receives ``act_as_user`` we expect a sudo session to be
+    established (admin login → ``login_user`` → action → double-logout)
+    and an INFO-level audit line to be emitted.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_numeric_user_id_triggers_sudo(self, config):
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        sudo_route = respx.post(f"{API_URL}/login/42").mock(
+            return_value=httpx.Response(200, json={"access_token": "sudo-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        delete_route = respx.delete(f"{API_URL}/projects/p1/git_branch/tmp_ci_abc").mock(
+            return_value=httpx.Response(204)
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "delete_git_branch",
+                {
+                    "project_id": "p1",
+                    "branch_name": "tmp_ci_abc",
+                    "act_as_user": "42",
+                },
+            )()
+            assert sudo_route.called, "login_user must be called for the target user"
+            assert delete_route.called
+            assert payload == {
+                "deleted": True,
+                "project_id": "p1",
+                "branch_name": "tmp_ci_abc",
+            }
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_email_resolves_via_lookup_then_sudo(self, config):
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        # ``GET /users?email=...&limit=1`` is what ``lookup_user_by_email``
+        # issues internally — the wrapper provider's lookup_fn is wired
+        # to that helper at bootstrap.
+        lookup_route = respx.get(f"{API_URL}/users").mock(
+            return_value=httpx.Response(200, json=[{"id": "77", "email": "ci-bot@example.com"}])
+        )
+        sudo_route = respx.post(f"{API_URL}/login/77").mock(
+            return_value=httpx.Response(200, json={"access_token": "sudo-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        delete_route = respx.delete(f"{API_URL}/projects/p1/git_branch/tmp_ci_abc").mock(
+            return_value=httpx.Response(204)
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            await _invoke_tool(
+                mcp,
+                "delete_git_branch",
+                {
+                    "project_id": "p1",
+                    "branch_name": "tmp_ci_abc",
+                    "act_as_user": "ci-bot@example.com",
+                },
+            )()
+            assert lookup_route.called, "email must be resolved via /users lookup"
+            assert sudo_route.called, "sudo target must be the resolved user_id"
+            assert delete_route.called
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_email_lookup_miss_surfaces_clean_error(self, config):
+        # Fail-loud is deliberate: a typo'd email must NOT silently fall
+        # back to the configured admin identity (which would perform the
+        # action under the wrong user).
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        respx.get(f"{API_URL}/users").mock(return_value=httpx.Response(200, json=[]))
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "delete_git_branch",
+                {
+                    "project_id": "p1",
+                    "branch_name": "tmp_ci_abc",
+                    "act_as_user": "ghost@example.com",
+                },
+            )()
+            assert "error" in payload
+            assert "ghost@example.com" in payload["error"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_emits_audit_log_on_argument_driven_sudo(self, config):
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        respx.post(f"{API_URL}/login/42").mock(
+            return_value=httpx.Response(200, json={"access_token": "sudo-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        respx.delete(f"{API_URL}/projects/p1/git_branch/tmp_ci_abc").mock(
+            return_value=httpx.Response(204)
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await _invoke_tool(
+                    mcp,
+                    "delete_git_branch",
+                    {
+                        "project_id": "p1",
+                        "branch_name": "tmp_ci_abc",
+                        "act_as_user": "42",
+                    },
+                )()
+
+            audit = [line for line in captured if line.get("event") == "looker.audit.act_as_user"]
+            assert len(audit) == 1, captured
+            entry = audit[0]
+            assert entry["target_user_id"] == "42"
+            assert entry["triggered_by"] == "argument"
+            assert entry["configured_user"] == "test-id"
+            assert entry["tool"] == "delete_git_branch"
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_invalid_format_rejected_up_front(self, config):
+        # A bare username (no ``@``, not all-digits) must fail validation
+        # rather than be forwarded to ``/login/alice`` where Looker would
+        # respond with an opaque 400/404. No login or sudo route is
+        # registered — if the validation isn't up-front, respx will
+        # surface an unmatched-request RuntimeError.
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "delete_git_branch",
+                {
+                    "project_id": "p1",
+                    "branch_name": "tmp_ci_abc",
+                    "act_as_user": "alice",
+                },
+            )()
+            # Surfaced as a clean validation error — no "Unexpected
+            # error" wrapper, since format_api_error special-cases
+            # ValueError.
+            assert "error" in payload
+            assert "Unexpected" not in payload["error"]
+            assert "alice" in payload["error"]
+            assert "numeric" in payload["error"].lower()
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_act_as_user_refused_when_sudo_disabled(self, config_sudo_disabled):
+        # The gate: with ``LOOKER_SUDO_AS_USER=false`` the operator has
+        # explicitly disabled sudo. ``act_as_user`` must fail loudly so
+        # the misconfiguration surfaces at the call site instead of
+        # silently routing the call under the configured identity.
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+
+        mcp, looker_client = create_server(config_sudo_disabled, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "delete_git_branch",
+                {
+                    "project_id": "p1",
+                    "branch_name": "tmp_ci_abc",
+                    "act_as_user": "42",
+                },
+            )()
+            assert "error" in payload
+            assert "LOOKER_SUDO_AS_USER" in payload["error"]
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_sudo_disabled_without_act_as_user_works(self, config_sudo_disabled):
+        # Companion to the gate test: without ``act_as_user``, the gate
+        # is irrelevant — calls run normally under api_key mode.
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        respx.get(f"{API_URL}/projects/p1/git_branches").mock(
+            return_value=httpx.Response(200, json=[{"name": "main"}])
+        )
+
+        mcp, looker_client = create_server(config_sudo_disabled, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(mcp, "list_git_branches", {"project_id": "p1"})()
+            assert payload[0]["name"] == "main"
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_no_audit_log_when_act_as_user_absent(self, config):
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        respx.get(f"{API_URL}/projects/p1/git_branches").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await _invoke_tool(mcp, "list_git_branches", {"project_id": "p1"})()
+
+            audit = [line for line in captured if line.get("event") == "looker.audit.act_as_user"]
+            assert audit == []
         finally:
             await looker_client.close()
 
