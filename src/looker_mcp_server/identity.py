@@ -56,6 +56,12 @@ class LookerIdentity:
     user_email: str | None = None
     user_subject: str | None = None
 
+    # how the sudo target was selected — "argument" (per-call act_as_user
+    # parameter) or "header" (gateway-injected request header). ``None``
+    # for non-sudo identities. Surfaced in audit logs so operators can
+    # tell admin-driven impersonation from gateway-driven impersonation.
+    triggered_by: str | None = None
+
 
 # ── Protocol ─────────────────────────────────────────────────────────
 
@@ -148,7 +154,149 @@ class SudoIdentityProvider:
             client_secret=self._client_secret,
             target_user_id=user_id,
             user_email=email,
+            triggered_by="header",
         )
+
+
+class ArgumentSudoIdentityProvider:
+    """Per-call admin impersonation via the ``act_as_user`` tool argument.
+
+    Wraps an inner :class:`IdentityProvider`. When a tool invocation
+    includes a non-empty ``act_as_user`` argument, this provider returns
+    a sudo identity targeting that user — overriding whatever identity
+    the inner provider would have resolved. When ``act_as_user`` is
+    absent, the inner provider's resolution is returned unchanged.
+
+    The argument value may be either:
+
+    - a Looker user ID (e.g. ``"123"``)
+    - an email address (containing ``@``), resolved to a user ID via
+      ``user_lookup_fn``
+
+    Sudo capability is enforced by Looker server-side: if the
+    credentials backing the configured admin login cannot impersonate,
+    ``login_user`` fails with HTTP 403. This provider only forwards
+    capability — it does not gate it.
+
+    Both invalid input formats and email-lookup misses raise
+    ``ValueError`` rather than silently falling back to the inner
+    identity. A silent fallback would make a mistyped email or stray
+    string perform an action as the *configured* admin user instead of
+    refusing — a footgun. Fail loudly so the caller can fix the input.
+
+    Accepted forms: an email address (containing ``@``) or an
+    all-digits Looker user ID. Anything else (e.g. a username
+    fragment, a UUID, an empty-after-stripping string) is rejected up
+    front with a clear validation error rather than being forwarded to
+    Looker's ``/login/{value}`` endpoint where it would surface as an
+    opaque HTTP 400/404.
+
+    .. note::
+
+       On **Looker (Google Cloud core)** only Embed-type users can be
+       impersonated via sudo. For regular GCC users, configure
+       ``OAuthIdentityProvider`` and pass tokens via the configured
+       header instead.
+    """
+
+    def __init__(
+        self,
+        inner: IdentityProvider,
+        client_id: str,
+        client_secret: str,
+        user_lookup_fn: Any | None = None,
+        argument_name: str = "act_as_user",
+        sudo_enabled: bool = True,
+    ) -> None:
+        self._inner = inner
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._user_lookup_fn = user_lookup_fn
+        self._argument_name = argument_name
+        self._sudo_enabled = sudo_enabled
+        self._email_to_id_cache: dict[str, str] = {}
+
+    async def resolve(self, context: RequestContext) -> LookerIdentity:
+        raw = context.arguments.get(self._argument_name)
+        if not raw:
+            return await self._inner.resolve(context)
+
+        act_as = str(raw).strip()
+        if not act_as:
+            return await self._inner.resolve(context)
+
+        # Honor the deployment's sudo kill switch. We could skip
+        # installing the wrapper entirely when ``sudo_enabled=False``,
+        # but then ``act_as_user`` would silently route the call under
+        # the configured identity — making an operator who disabled
+        # sudo see calls succeed as the wrong user. Failing loudly is
+        # the safer carve-out (cf. "no half-baked PRs": silent-disable
+        # on opt-in is the failure mode to avoid).
+        if not self._sudo_enabled:
+            logger.warning(
+                "looker.act_as_user.sudo_disabled",
+                tool=context.tool_name,
+            )
+            raise ValueError(
+                "act_as_user requires LOOKER_SUDO_AS_USER=true. "
+                "Either enable sudo on the server or remove the "
+                "act_as_user argument from the call."
+            )
+
+        if "@" in act_as:
+            email = act_as
+            user_id = self._email_to_id_cache.get(email)
+            if user_id is None and self._user_lookup_fn is not None:
+                user_id = await self._user_lookup_fn(email)
+                if user_id is not None:
+                    self._email_to_id_cache[email] = user_id
+            if user_id is None:
+                logger.warning(
+                    "looker.act_as_user.lookup_miss",
+                    email=email,
+                    tool=context.tool_name,
+                )
+                raise ValueError(
+                    f"act_as_user: no Looker user found for email {email!r}. "
+                    "Verify the email or pass a numeric user ID instead."
+                )
+        elif act_as.isdigit():
+            email = None
+            user_id = act_as
+        else:
+            # Reject up front rather than forwarding to ``/login/{value}``
+            # where Looker would respond with an opaque 400/404. Same
+            # bad-input failure mode as a lookup miss.
+            logger.warning(
+                "looker.act_as_user.invalid_format",
+                value=act_as,
+                tool=context.tool_name,
+            )
+            raise ValueError(
+                f"act_as_user: {act_as!r} is not a valid Looker user reference. "
+                "Pass either a numeric Looker user ID (e.g. '42') or an email "
+                "address (e.g. 'user@example.com')."
+            )
+
+        return LookerIdentity(
+            mode="sudo",
+            client_id=self._client_id,
+            client_secret=self._client_secret,
+            target_user_id=user_id,
+            user_email=email,
+            triggered_by="argument",
+        )
+
+    def set_user_lookup(self, fn: Any) -> None:
+        """Inject the user-lookup function after the client is ready.
+
+        Propagates the same function to the wrapped inner provider when
+        it supports lookup injection, so a single call wires the whole
+        chain (e.g. ``ArgumentSudo`` wrapping ``DualMode``).
+        """
+        self._user_lookup_fn = fn
+        if hasattr(self._inner, "set_user_lookup"):
+            self._inner.set_user_lookup(fn)  # type: ignore[attr-defined]
 
 
 class OAuthIdentityProvider:

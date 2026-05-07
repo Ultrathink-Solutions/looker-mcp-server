@@ -214,7 +214,28 @@ class LookerClient:
                         identity.target_user_id,
                         associative=self._config.sudo_associative,
                     )
-                    log.debug("looker.session.sudo", user_id=identity.target_user_id)
+                    log.debug(
+                        "looker.session.sudo",
+                        user_id=identity.target_user_id,
+                        triggered_by=identity.triggered_by,
+                    )
+                    # Argument-driven sudo is admin impersonation requested
+                    # explicitly by the caller (per-call ``act_as_user``
+                    # parameter). It MUST be auditable independently of
+                    # header-driven sudo (gateway pattern), so emit an
+                    # INFO-level audit line for it. ``configured_user`` is
+                    # the API3 client_id that performed the underlying
+                    # ``login_user`` — i.e. the admin identity backing the
+                    # impersonation.
+                    if identity.triggered_by == "argument":
+                        log.info(
+                            "looker.audit.act_as_user",
+                            tool=context.tool_name,
+                            target_user_id=identity.target_user_id,
+                            target_user_email=identity.user_email,
+                            triggered_by=identity.triggered_by,
+                            configured_user=identity.client_id,
+                        )
                     try:
                         yield LookerSession(self._http, sudo_token)
                     finally:
@@ -348,6 +369,13 @@ def format_api_error(tool_name: str, error: Exception) -> str:
         result = {"error": hint, "status": status}
         if error.detail:
             result["detail"] = error.detail
+    elif isinstance(error, ValueError):
+        # Validation errors raised by tools or identity providers
+        # (e.g. ``act_as_user`` rejecting a malformed value or an
+        # unresolvable email) carry a self-describing message — surface
+        # it directly instead of dressing it up as an "unexpected"
+        # error, which would mislead callers about whether to retry.
+        result = {"error": str(error)}
     else:
         result = {"error": f"Unexpected error in {tool_name}: {error}"}
     return json.dumps(result, indent=2)

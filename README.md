@@ -107,7 +107,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **folder** | `list_folders`, `get_folder`, `create_folder`, `update_folder`, `delete_folder`, `get_folder_children`, `get_folder_ancestors`, `get_folder_looks`, `get_folder_dashboards` | Navigate and manage the folder hierarchy |
 | **health**\* | `health_pulse`, `health_analyze`, `health_vacuum` | Instance health checks and usage analysis |
 | **modeling** | `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `get_project_manifest`, `get_project_deploy_key`, `create_project_deploy_key`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `validate_project`, `list_datagroups`, `reset_datagroup` | LookML project lifecycle, file edits, syntax validation, and datagroup cache management |
-| **git** | `get_git_branch`, `list_git_branches`, `create_git_branch`, `switch_git_branch`, `deploy_to_production`, `reset_to_production` | Git operations and production deployment |
+| **git** | `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`, `get_git_deploy_key`, `create_git_deploy_key`, `list_git_connection_tests`, `run_git_connection_test` | Git branch lifecycle, production deploy, SSH deploy-key rotation, and git-connection diagnostics |
 | **admin** | `list_users`, `get_user`, `create_user`, `update_user`, `delete_user`, `create_credentials_email`, `send_password_reset`, `list_roles`, `get_role`, `create_role`, `update_role`, `delete_role`, `get_role_groups`, `get_role_users`, `list_permissions`, `list_permission_sets`, `create_permission_set`, `update_permission_set`, `delete_permission_set`, `list_model_sets`, `create_model_set`, `update_model_set`, `delete_model_set`, `list_groups`, `create_group`, `delete_group`, `add_group_user`, `remove_group_user`, `set_role_groups`, `set_role_users`, `set_user_roles`, `get_user_roles`, `list_schedules`, `create_schedule`, `update_schedule`, `delete_schedule`, `run_schedule_once` | User, role, RBAC, group, and schedule management |
 | **connection** | `get_connection`, `list_connection_dialects`, `create_connection`, `update_connection`, `delete_connection`, `test_connection` | Database connection CRUD and health checks |
 | **user_attributes** | `list_user_attributes`, `get_user_attribute`, `create_user_attribute`, `update_user_attribute`, `delete_user_attribute`, `list_user_attribute_group_values`, `set_user_attribute_group_values`, `delete_user_attribute_group_value`, `list_user_attribute_values_for_user`, `set_user_attribute_user_value`, `delete_user_attribute_user_value` | User attribute definitions plus per-group and per-user value overrides (row-level security, per-developer credentials, filter defaults) |
@@ -212,6 +212,54 @@ When `LOOKER_SUDO_AS_USER=true` (the default), the server uses a `DualModeIdenti
 - **Self-hosted** → sudo (via `X-User-Email` header)
 - **Google Cloud core** → OAuth (via `X-User-Token` header)
 - **No identity headers** → service account fallback
+
+### Per-Call Admin Impersonation (`act_as_user`)
+
+Looker dev mode (`workspace_id=dev`) is **per-user-isolated by design**. Each user has their own dev workspace; uncommitted LookML changes, the active branch, and dev-mode local branches all live in the calling user's workspace. That means an admin running `delete_git_branch` against the *admin's* dev workspace does nothing about a stuck branch in *another user's* dev workspace.
+
+The git tools accept an optional `act_as_user` argument so an admin can perform the call as a different user — typically to clean up someone else's stuck dev-workspace state without leaving the MCP for raw HTTP. Accepts either a numeric user ID or an email address (resolved to an ID via Looker's user-search API).
+
+```jsonc
+// Example: admin sweeping a stale CI branch out of ci-bot's dev workspace
+{
+  "tool": "delete_git_branch",
+  "arguments": {
+    "project_id": "acme_analytics",
+    "branch_name": "tmp_ci_5bd8888773",
+    "act_as_user": "ci-bot@example.com"
+  }
+}
+```
+
+**Configuration.** Per-call admin impersonation is gated by `LOOKER_SUDO_AS_USER` — that flag is the single kill switch for sudo-capable behavior in the OSS server, and `act_as_user` respects it. Set `LOOKER_SUDO_AS_USER=true` (the default when admin credentials are configured) to enable. With `LOOKER_SUDO_AS_USER=false`, passing `act_as_user` raises a clear validation error rather than silently running the call under the configured identity — surfacing the misconfiguration at the call site instead of letting it route to the wrong user.
+
+**Security model.** The MCP forwards capability — it does not gate it. Sudo permission is enforced by Looker server-side: if the configured `LOOKER_CLIENT_ID` does not have sudo capability, `login_user` returns HTTP 403 and the tool fails. There is no MCP-side "who may impersonate whom" policy in the open-source server; layer one in via a wrapping `IdentityProvider` if you need it (see the next section).
+
+**Tool coverage (v1).** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
+
+**Audit log.** Every argument-driven sudo emits an INFO-level structlog line:
+
+```json
+{
+  "event": "looker.audit.act_as_user",
+  "tool": "delete_git_branch",
+  "target_user_id": "77",
+  "target_user_email": "ci-bot@example.com",
+  "triggered_by": "argument",
+  "configured_user": "admin-api3-client-id"
+}
+```
+
+This is independent of the trace-level `looker.session.sudo` debug line and is the right hook for downstream audit pipelines. Header-driven sudo (gateway pattern) is tagged `triggered_by="header"` on the debug line — `looker.audit.act_as_user` fires only for explicit per-call admin impersonation.
+
+**Mode interaction.** `act_as_user` overrides the inner identity, including OAuth and header-based sudo. This is intentional — an explicit admin override should win over implicit gateway routing — but the underlying credentials must still have sudo capability, which Looker enforces. On Google Cloud core only Embed-type users can be impersonated; for regular GCC users use Mode 3 (OAuth pass-through) instead.
+
+**Failure modes.**
+
+- `act_as_user` is neither all-digits nor an email (no `@`) → validation error rejected up front, before any Looker call. Avoids forwarding garbage to `/login/{value}` where it would surface as an opaque HTTP 400.
+- Email does not match any Looker user → validation error. Fail-loud is deliberate; silently falling back to the configured identity would let a typo'd email run the action under the wrong user.
+- `LOOKER_SUDO_AS_USER=false` and `act_as_user` is passed → validation error explaining how to fix (enable sudo or remove the argument).
+- Configured credentials lack sudo capability → Looker returns 403 on `login_user`, surfaced as `Permission denied — the current user lacks access.`
 
 ## Extending with Custom Identity Providers
 
