@@ -102,7 +102,11 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                 query_def = await session.post("/queries", body=body)
                 query_id = query_def["id"]
 
-                result = await session.get(f"/queries/{query_id}/run/sql")
+                # Looker returns the compiled SQL as text/plain; calling
+                # session.get would route through response.json() and raise
+                # ``Expecting value: line 1 column 1 (char 0)``. Mirrors the
+                # pattern used by the git deploy-key tools.
+                result = await session.get_text(f"/queries/{query_id}/run/sql")
                 return json.dumps({"sql": result}, indent=2)
         except Exception as e:
             return format_api_error("query_sql", e)
