@@ -625,6 +625,13 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         )
         try:
             _validate_branch_args(branch, project_id)
+            # ``httpx.Timeout(0)`` raises ``ValueError`` and negative values
+            # produce undefined behavior — both surface as opaque transport
+            # errors well after authentication and workspace setup. Catch
+            # at the validation layer so callers see a deterministic
+            # ``ValueError`` before any Looker side effects.
+            if timeout <= 0:
+                raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}.")
             effective_dev_mode = dev_mode or branch is not None
             async with client.session(ctx, dev_mode=effective_dev_mode) as session:
                 async with _maybe_use_branch(session, project_id, branch):

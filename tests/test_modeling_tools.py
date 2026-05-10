@@ -947,3 +947,36 @@ class TestLookmlTests:
         # respects the API's filtering surface (model/test/file_id).
         assert "model=ecommerce" in captured["url"]
         assert "test=test_orders_total" in captured["url"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize("bad_timeout", [0, 0.0, -1, -10.5])
+    async def test_run_rejects_non_positive_timeout(self, config, bad_timeout):
+        # ``httpx.Timeout(0)`` raises and negative values are undefined —
+        # both would surface as opaque transport-layer errors well after
+        # auth + workspace setup. Reject up front with a clear ValueError
+        # so callers get a deterministic validation error.
+        _mock_login_logout()
+        # Mock both endpoints we expect NOT to be called so any leak fails
+        # this test loudly instead of silently passing.
+        login_route = respx.get(f"{API_URL}/projects/proj1/lookml_tests/run").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "run_lookml_tests",
+                    {"project_id": "proj1", "timeout": bad_timeout},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert "timeout" in payload["error"]
+                assert "positive" in payload["error"]
+        finally:
+            await looker_client.close()
+
+        # Validation must short-circuit before the underlying GET.
+        assert not login_route.called
