@@ -60,8 +60,9 @@ class LookerSession:
         self,
         path: str,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
-        return await self._request("GET", path, params=params)
+        return await self._request("GET", path, params=params, timeout=timeout)
 
     async def post(
         self,
@@ -233,14 +234,19 @@ class LookerSession:
         path: str,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | list[Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
-        response = await self._http.request(
-            method,
-            path,
-            headers=self._headers,
-            params=params,
-            json=json,
-        )
+        # Per-call timeout overrides the connection default. Used for
+        # long-running endpoints like ``/lookml_tests/run`` where data
+        # tests can run for many minutes against the warehouse.
+        request_kwargs: dict[str, Any] = {
+            "headers": self._headers,
+            "params": params,
+            "json": json,
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = httpx.Timeout(timeout)
+        response = await self._http.request(method, path, **request_kwargs)
         self._raise_for_status(response)
 
         if response.status_code == 204 or not response.content:

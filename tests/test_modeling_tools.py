@@ -770,3 +770,180 @@ class TestFileOpsDevMode:
         assert put_branch.call_count == 2
         bodies = [json.loads(c.request.content.decode()) for c in put_branch.calls]
         assert bodies == [{"name": "feature-x"}, {"name": "main"}]
+
+
+class TestLookmlTests:
+    """The load-bearing primitive for catching data-regression bugs in CI:
+    runs LookML data tests against the warehouse and reports per-test
+    success/failure with the assertion-level errors. Pair with branch=…
+    to validate a PR before merge."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_list_returns_test_names_models_files(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/projects/proj1/lookml_tests").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "test_orders_total",
+                        "model_name": "ecommerce",
+                        "explore_name": "orders",
+                        "file": "tests/orders.lkml",
+                        "line": 12,
+                        "query_url_params": "fields=orders.region",
+                    }
+                ],
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("list_lookml_tests", {"project_id": "proj1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload[0]["name"] == "test_orders_total"
+                assert payload[0]["model"] == "ecommerce"
+                assert payload[0]["explore"] == "orders"
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_default_runs_against_production(self, config):
+        _mock_login_logout()
+        # No PATCH /session expected with default args — production-only.
+        patch_route = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "production"})
+        )
+        respx.get(f"{API_URL}/projects/proj1/lookml_tests/run").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "model_name": "ecommerce",
+                        "test_name": "test_orders_total",
+                        "success": True,
+                        "errors": [],
+                    }
+                ],
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("run_lookml_tests", {"project_id": "proj1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["passed"] is True
+                assert payload["test_count"] == 1
+                assert payload["failure_count"] == 0
+        finally:
+            await looker_client.close()
+
+        assert not patch_route.called, "default run should not switch workspace"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_with_branch_does_full_atomic_cycle_and_surfaces_failures(self, config):
+        _mock_login_logout()
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        get_branch = respx.get(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+        put_branch = respx.put(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+        # The exact failure pattern from the field-report incident: a
+        # broken assert that Spectacles false-passes but Looker's runtime
+        # evaluator throws on. We expect run_lookml_tests to surface it
+        # with assertion-level detail.
+        respx.get(f"{API_URL}/projects/proj1/lookml_tests/run").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "model_name": "ecommerce",
+                        "test_name": "test_orders_total",
+                        "success": False,
+                        "errors": [
+                            {
+                                "message": ("wrong argument type NilClass (expected Integer)"),
+                                "line_number": 42,
+                            }
+                        ],
+                    },
+                    {
+                        "model_name": "ecommerce",
+                        "test_name": "test_orders_count",
+                        "success": True,
+                        "errors": [],
+                    },
+                ],
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "run_lookml_tests",
+                    {"project_id": "proj1", "branch": "feature-x"},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["passed"] is False
+                assert payload["test_count"] == 2
+                assert payload["failure_count"] == 1
+                # Raw results passed through — the failure carries the
+                # assertion-level error for the regression report.
+                fail = next(r for r in payload["results"] if not r["success"])
+                assert "NilClass" in fail["errors"][0]["message"]
+        finally:
+            await looker_client.close()
+
+        # Full atomic cycle: workspace switch + branch swap + run + restore.
+        assert patch_session.called
+        assert get_branch.called
+        assert put_branch.call_count == 2
+        bodies = [json.loads(c.request.content.decode()) for c in put_branch.calls]
+        assert bodies == [{"name": "feature-x"}, {"name": "main"}]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_filters_passed_to_query_params(self, config):
+        _mock_login_logout()
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json=[])
+
+        respx.get(f"{API_URL}/projects/proj1/lookml_tests/run").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "run_lookml_tests",
+                    {
+                        "project_id": "proj1",
+                        "model": "ecommerce",
+                        "test": "test_orders_total",
+                    },
+                )
+        finally:
+            await looker_client.close()
+
+        # Filter args ride as query params on the GET — verifies the tool
+        # respects the API's filtering surface (model/test/file_id).
+        assert "model=ecommerce" in captured["url"]
+        assert "test=test_orders_total" in captured["url"]
