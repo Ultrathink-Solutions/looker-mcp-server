@@ -106,7 +106,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **board** | `list_boards`, `get_board`, `create_board`, `update_board`, `delete_board`, `get_board_section`, `create_board_section`, `update_board_section`, `delete_board_section`, `get_board_item`, `create_board_item`, `update_board_item`, `delete_board_item` | Curate content with boards, sections, and items |
 | **folder** | `list_folders`, `get_folder`, `create_folder`, `update_folder`, `delete_folder`, `get_folder_children`, `get_folder_ancestors`, `get_folder_looks`, `get_folder_dashboards` | Navigate and manage the folder hierarchy |
 | **health**\* | `health_pulse`, `health_analyze`, `health_vacuum` | Instance health checks and usage analysis |
-| **modeling** | `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `get_project_manifest`, `get_project_deploy_key`, `create_project_deploy_key`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `validate_project`, `list_datagroups`, `reset_datagroup` | LookML project lifecycle, file edits, syntax validation, and datagroup cache management |
+| **modeling** | `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `get_project_manifest`, `get_project_deploy_key`, `create_project_deploy_key`, `list_project_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `validate_project`, `list_datagroups`, `get_datagroup`, `reset_datagroup`, `trigger_datagroup`, `start_pdt_build`, `check_pdt_build`, `stop_pdt_build`, `graph_derived_tables_for_view`, `graph_derived_tables_for_model` | LookML project lifecycle, file edits, syntax validation, datagroup cache + trigger management, and PDT build administration |
 | **git** | `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`, `get_git_deploy_key`, `create_git_deploy_key`, `list_git_connection_tests`, `run_git_connection_test` | Git branch lifecycle, production deploy, SSH deploy-key rotation, and git-connection diagnostics |
 | **admin** | `list_users`, `get_user`, `create_user`, `update_user`, `delete_user`, `create_credentials_email`, `send_password_reset`, `list_roles`, `get_role`, `create_role`, `update_role`, `delete_role`, `get_role_groups`, `get_role_users`, `list_permissions`, `list_permission_sets`, `create_permission_set`, `update_permission_set`, `delete_permission_set`, `list_model_sets`, `create_model_set`, `update_model_set`, `delete_model_set`, `list_groups`, `create_group`, `delete_group`, `add_group_user`, `remove_group_user`, `set_role_groups`, `set_role_users`, `set_user_roles`, `get_user_roles`, `list_schedules`, `create_schedule`, `update_schedule`, `delete_schedule`, `run_schedule_once` | User, role, RBAC, group, and schedule management |
 | **connection** | `get_connection`, `list_connection_dialects`, `create_connection`, `update_connection`, `delete_connection`, `test_connection` | Database connection CRUD and health checks |
@@ -419,6 +419,51 @@ All three URIs must be absolute `https://` URLs; the server fails closed at star
 - **Future major release** — removed entirely.
 
 If you currently rely on `LOOKER_MCP_AUTH_TOKEN` for gateway-level MCP protection, plan the migration now: either stand up an authorization server that issues OAuth 2.1 access tokens bound to `aud=<LOOKER_MCP_RESOURCE_URI>`, or keep the server in `dev` mode behind a trusted network perimeter.
+
+## PDT Administration Workflows
+
+PDT (Persistent Derived Table) lifecycle is split across two tool groups: the `connection` group's `update_connection` toggles PDT control on a connection and the `modeling` group's `start_pdt_build` / `check_pdt_build` / `stop_pdt_build` (build management), `trigger_datagroup` (force rebuild + cache invalidation), and `graph_derived_tables_for_*` (dependency inspection) cover the per-PDT operations.
+
+Two opinionated recipes for connection-level workflows:
+
+### Disable PDT workflow on a connection
+
+When you need to quiesce all PDT builds on a connection (warehouse maintenance, cost spike investigation, etc.):
+
+```jsonc
+// 1. Stop new builds at the source — Looker will reject any further enqueues
+{ "tool": "update_connection", "args": { "name": "my_warehouse", "pdt_api_control_enabled": false } }
+
+// 2. Inspect what's currently materialized so you know what's at risk
+{ "tool": "graph_derived_tables_for_model", "args": { "model": "ecommerce", "color": true } }
+
+// 3. (Optional) Stop any in-flight builds you have materialization_ids for
+{ "tool": "stop_pdt_build", "args": { "materialization_id": "mat-abc" } }
+
+// 4. Verify the connection is quiesced
+{ "tool": "test_connection", "args": { "name": "my_warehouse", "tests": ["pdt"] } }
+```
+
+### Enable PDT workflow on a connection
+
+When you're ready to re-enable PDT builds after maintenance:
+
+```jsonc
+// 1. Re-enable PDT API control
+{ "tool": "update_connection", "args": { "name": "my_warehouse", "pdt_api_control_enabled": true } }
+
+// 2. Verify the connection is healthy for PDT builds
+{ "tool": "test_connection", "args": { "name": "my_warehouse", "tests": ["pdt"] } }
+
+// 3. (Optional) Force-rebuild gating datagroups so downstream PDTs catch up
+{ "tool": "trigger_datagroup", "args": { "datagroup_id": "dg1" } }
+
+// 4. (Optional) Pre-warm specific PDTs
+{ "tool": "start_pdt_build", "args": { "model_name": "ecommerce", "view_name": "orders_pdt" } }
+{ "tool": "check_pdt_build", "args": { "materialization_id": "mat-…" } }  // poll until status == "complete"
+```
+
+These recipes are intentionally exposed as separate primitives rather than a single `disable_pdt_workflow(connection)` composite tool. Each call emits its own audit line in the `looker.session.sudo` debug log when run under `act_as_user`, which is the right granularity for compliance review. A composite tool would hide steps from the LLM-as-operator and make failure paths less legible.
 
 ## Health Endpoints
 

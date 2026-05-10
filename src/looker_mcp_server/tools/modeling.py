@@ -482,3 +482,272 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                 )
         except Exception as e:
             return format_api_error("reset_datagroup", e)
+
+    @server.tool(
+        description=(
+            "Get detail for a single datagroup, including its model, name, "
+            "interval/sql triggers, last ``triggered_at`` time, and current "
+            "``stale_before`` marker. Use to inspect a datagroup before "
+            "calling ``trigger_datagroup`` or ``reset_datagroup``."
+        ),
+    )
+    async def get_datagroup(
+        datagroup_id: Annotated[str, "Datagroup ID (from list_datagroups)"],
+    ) -> str:
+        ctx = client.build_context("get_datagroup", "modeling", {"datagroup_id": datagroup_id})
+        try:
+            async with client.session(ctx) as session:
+                d = await session.get(f"/datagroups/{_path_seg(datagroup_id)}")
+                if not d:
+                    return json.dumps({"id": datagroup_id, "found": False}, indent=2)
+                return json.dumps(
+                    {
+                        "id": d.get("id"),
+                        "model_name": d.get("model_name"),
+                        "name": d.get("name"),
+                        "trigger_check_at": d.get("trigger_check_at"),
+                        "triggered_at": d.get("triggered_at"),
+                        "stale_before": d.get("stale_before"),
+                        "trigger_value": d.get("trigger_value"),
+                        "trigger_error": d.get("trigger_error"),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("get_datagroup", e)
+
+    @server.tool(
+        description=(
+            "Trigger a datagroup by setting its ``triggered_at`` to the "
+            "current time. Forces a PDT rebuild AND cache invalidation for "
+            "everything tagged with the datagroup — distinct from "
+            "``reset_datagroup``, which only updates ``stale_before`` (cache "
+            "bust without a rebuild). Use this to manually pre-warm a PDT or "
+            "to force-rebuild after upstream data corrections."
+        ),
+    )
+    async def trigger_datagroup(
+        datagroup_id: Annotated[str, "Datagroup ID (from list_datagroups)"],
+    ) -> str:
+        import time
+
+        ctx = client.build_context("trigger_datagroup", "modeling", {"datagroup_id": datagroup_id})
+        try:
+            async with client.session(ctx) as session:
+                body = {"triggered_at": int(time.time())}
+                updated = await session.patch(f"/datagroups/{_path_seg(datagroup_id)}", body=body)
+                return json.dumps(
+                    {
+                        "id": updated.get("id") if updated else datagroup_id,
+                        "triggered": True,
+                        "triggered_at": body["triggered_at"],
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("trigger_datagroup", e)
+
+    # ── PDT (Persistent Derived Table) build administration ──────────
+
+    @server.tool(
+        description=(
+            "Enqueue materialization of a PDT identified by ``model`` + "
+            "``view``. Returns a ``materialization_id`` you can poll via "
+            "``check_pdt_build`` and cancel via ``stop_pdt_build``. By "
+            "default builds in production; pass ``workspace='dev'`` to "
+            "build the dev-workspace's version of the PDT (useful when "
+            "validating LookML changes that affect derived-table SQL)."
+        ),
+    )
+    async def start_pdt_build(
+        model_name: Annotated[str, "LookML model name owning the PDT"],
+        view_name: Annotated[str, "View name of the PDT to build"],
+        force_rebuild: Annotated[
+            bool,
+            "Force rebuild of dependent PDTs even if already materialized.",
+        ] = False,
+        force_full_incremental: Annotated[
+            bool,
+            "Force any incremental PDTs in the dependency chain to fully re-materialize.",
+        ] = False,
+        workspace: Annotated[
+            str,
+            "Workspace for materialization: ``'production'`` (default) or ``'dev'``.",
+        ] = "production",
+        source: Annotated[
+            str | None,
+            "Optional caller tag — surfaces in Looker's PDT build logs.",
+        ] = None,
+    ) -> str:
+        ctx = client.build_context(
+            "start_pdt_build",
+            "modeling",
+            {"model_name": model_name, "view_name": view_name, "workspace": workspace},
+        )
+        try:
+            async with client.session(ctx) as session:
+                # Looker's start_pdt_build is GET (per OpenAPI spec); booleans
+                # ride as the strings 'true'/'false' in the query string.
+                params: dict[str, Any] = {"workspace": workspace}
+                if force_rebuild:
+                    params["force_rebuild"] = "true"
+                if force_full_incremental:
+                    params["force_full_incremental"] = "true"
+                _set_if(params, "source", source)
+                result = await session.get(
+                    f"/derived_table/{_path_seg(model_name)}/{_path_seg(view_name)}/start",
+                    params=params,
+                )
+                return json.dumps(
+                    {
+                        "materialization_id": (result or {}).get("materialization_id"),
+                        "resp_text": (result or {}).get("resp_text"),
+                        "status": (result or {}).get("status"),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("start_pdt_build", e)
+
+    @server.tool(
+        description=(
+            "Check the status of a PDT materialization started via "
+            "``start_pdt_build``. Returns ``status`` (e.g. ``running``, "
+            "``complete``, ``error``), progress ratio, and any "
+            "``resource_usage`` Looker has emitted. Poll until status "
+            "is terminal."
+        ),
+    )
+    async def check_pdt_build(
+        materialization_id: Annotated[str, "ID returned by ``start_pdt_build``"],
+    ) -> str:
+        ctx = client.build_context(
+            "check_pdt_build", "modeling", {"materialization_id": materialization_id}
+        )
+        try:
+            async with client.session(ctx) as session:
+                result = await session.get(f"/derived_table/{_path_seg(materialization_id)}/status")
+                return json.dumps(
+                    {
+                        "materialization_id": (result or {}).get("materialization_id"),
+                        "status": (result or {}).get("status"),
+                        "ratio": (result or {}).get("ratio"),
+                        "resp_text": (result or {}).get("resp_text"),
+                        "resource_usage": (result or {}).get("resource_usage"),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("check_pdt_build", e)
+
+    @server.tool(
+        description=(
+            "Cancel an in-flight PDT materialization. Use to free a stuck "
+            "build or recover after a runaway query. Note: Looker's API "
+            "implements stop as a GET (not DELETE) — this tool wraps that "
+            "convention. The materialization_id comes from "
+            "``start_pdt_build`` or from the PDT build log in "
+            "``system__activity``."
+        ),
+    )
+    async def stop_pdt_build(
+        materialization_id: Annotated[str, "ID returned by ``start_pdt_build``"],
+        source: Annotated[
+            str | None,
+            "Optional caller tag — surfaces in Looker's PDT build logs.",
+        ] = None,
+    ) -> str:
+        ctx = client.build_context(
+            "stop_pdt_build", "modeling", {"materialization_id": materialization_id}
+        )
+        try:
+            async with client.session(ctx) as session:
+                params: dict[str, Any] = {}
+                _set_if(params, "source", source)
+                result = await session.get(
+                    f"/derived_table/{_path_seg(materialization_id)}/stop",
+                    params=params or None,
+                )
+                status = (result or {}).get("status")
+                return json.dumps(
+                    {
+                        "materialization_id": (result or {}).get("materialization_id"),
+                        # Derive ``stopped`` from the actual response state.
+                        # A no-op stop (e.g., the materialization already
+                        # finished) returns a non-stopped status, and we
+                        # must not falsely report cancellation success.
+                        "stopped": status == "stopped",
+                        "status": status,
+                        "resp_text": (result or {}).get("resp_text"),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("stop_pdt_build", e)
+
+    @server.tool(
+        description=(
+            "Get the PDT dependency graph for a single derived-table view. "
+            "Returns a DOT-language description of the subgraph (the view "
+            "and everything it transitively depends on). Useful before "
+            "kicking off a force-rebuild — you can see what other PDTs "
+            "will be regenerated."
+        ),
+    )
+    async def graph_derived_tables_for_view(
+        view: Annotated[str, "Derived-table view name"],
+        models: Annotated[
+            str | None,
+            "Optional comma-separated model names to scope the search.",
+        ] = None,
+        workspace: Annotated[
+            str,
+            "Workspace to query: ``'production'`` (default) or ``'dev'``.",
+        ] = "production",
+    ) -> str:
+        ctx = client.build_context(
+            "graph_derived_tables_for_view",
+            "modeling",
+            {"view": view, "workspace": workspace},
+        )
+        try:
+            async with client.session(ctx) as session:
+                params: dict[str, Any] = {"workspace": workspace}
+                _set_if(params, "models", models)
+                graph = await session.get(
+                    f"/derived_table/graph/view/{_path_seg(view)}",
+                    params=params,
+                )
+                return json.dumps(graph, indent=2)
+        except Exception as e:
+            return format_api_error("graph_derived_tables_for_view", e)
+
+    @server.tool(
+        description=(
+            "Get the full PDT dependency graph for a model. Returns DOT-"
+            "language graph description with optional color coding by "
+            "build state (grey=not built, green=built, yellow=building, "
+            "red=error). Use to audit PDT freshness across a whole model."
+        ),
+    )
+    async def graph_derived_tables_for_model(
+        model: Annotated[str, "LookML model name"],
+        format: Annotated[str, "Graph format. Currently only 'dot' is supported."] = "dot",
+        color: Annotated[
+            bool,
+            "Color the graph nodes by current build status.",
+        ] = False,
+    ) -> str:
+        ctx = client.build_context("graph_derived_tables_for_model", "modeling", {"model": model})
+        try:
+            async with client.session(ctx) as session:
+                params: dict[str, Any] = {"format": format}
+                if color:
+                    params["color"] = "true"
+                graph = await session.get(
+                    f"/derived_table/graph/model/{_path_seg(model)}",
+                    params=params,
+                )
+                return json.dumps(graph, indent=2)
+        except Exception as e:
+            return format_api_error("graph_derived_tables_for_model", e)
