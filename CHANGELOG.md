@@ -7,6 +7,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-10
+
+This release closes the **dev-mode gap** across every workspace-scoped
+tool group, adds the load-bearing primitive for catching LookML
+data-regression bugs in CI (`run_lookml_tests`), and introduces full
+datagroup + PDT build administration. Query, modeling, and the
+dev-mode-required git tools now accept a uniform `dev_mode` + `branch`
++ `project_id` + `act_as_user` triad — set `branch=…` to atomically
+swap the dev workspace to a feature branch for the call, run the
+operation, and restore the saved branch in a `finally` block (even
+when the body raises). `validate_project` previously had no dev-mode
+support at all and silently validated production LookML even when
+called against a feature branch; that's now an explicit opt-in via
+the same triad. The new `LookerSession.update_workspace` and
+`LookerSession.use_branch` primitives in `client.py` are reusable by
+custom tools that want the same atomic semantics. A new `identity`
+tool group exposes `whoami` so callers can confirm the active session
+identity (especially useful when a Looker instance has multiple
+similarly-named users and per-call `act_as_user` impersonation is in
+play). The `LookerApiError.body` field now preserves the full Looker
+error envelope on 4xx/5xx responses, surfacing high-signal debugging
+fields like `sql` (compiled SQL on query failures), `errors[]`
+(LookML compile/evaluator diagnostics), and `applied_filters`.
+
+### Added
+
+- **Universal dev-mode parameters across query, modeling, and git
+  tool groups.** Query tools (`query`, `query_sql`, `query_url`,
+  `run_look`) and modeling tools (`list_project_files`, `get_file`,
+  `create_file`, `update_file`, `delete_file`, `validate_project`,
+  `list_lookml_tests`, `run_lookml_tests`) accept a uniform `dev_mode`,
+  `branch`, `project_id`, `act_as_user` parameter set. Setting
+  `branch=…` implies `dev_mode=True` and triggers atomic save → swap
+  → run → restore semantics: the dev workspace's currently-checked-out
+  branch is captured before the call and restored on exit (success or
+  failure). The four dev-mode-required git tools (`switch_git_branch`,
+  `create_git_branch`, `delete_git_branch`, `reset_to_production`)
+  now default `dev_mode=True` so they no longer fail with
+  `400 Developer mode required`. `act_as_user` is propagated through
+  the same `ArgumentSudoIdentityProvider` machinery as in v0.15.0,
+  enabling the canonical CI pattern: sudo as a dedicated `ci-bot`
+  user, swap to the feature branch, validate or query, restore. See
+  the new *Dev Mode and Branch Validation* section in the README for
+  the four canonical workflows (one-shot CI, prod vs PR diff,
+  iterative human debug, cleanup another user's stuck workspace) and
+  the per-Looker-user concurrency caveat.
+- **`LookerSession.update_workspace(workspace_id)` and
+  `LookerSession.use_branch(project_id, branch_name)`** in
+  `looker_mcp_server.client`. The first wraps Looker's
+  `PATCH /session` with `{"workspace_id": "dev" | "production"}`;
+  the second is an `@asynccontextmanager` that performs the atomic
+  save/swap/restore cycle. Reusable by custom tools that need the
+  same semantics. `use_branch` fails fast with `LookerApiError` if
+  Looker returns a malformed payload without a `name` field — the
+  guard prevents a downstream `PUT {"name": null}` that would leave
+  the workspace stuck on the caller-supplied branch.
+- **`list_lookml_tests` and `run_lookml_tests`** in the modeling
+  group. These are the load-bearing primitives for catching
+  data-regression bugs introduced by a PR. Looker compiles each
+  test's `explore_source` query, runs it against the warehouse, and
+  evaluates the assertion expression against the result rows — pair
+  with `branch=…` to validate a feature branch before merge. The
+  `run_lookml_tests` per-call timeout defaults to 1800 seconds (30
+  minutes, matching what Spectacles uses for the same endpoint)
+  because data tests run real warehouse queries with assertions on
+  potentially large tables; non-positive values are rejected with a
+  clear `ValueError` before any Looker call. Failures pass through
+  the raw assertion-level detail (`model_name`, `test_name`,
+  `success`, `errors[]`) since that's exactly what a regression
+  report needs.
+- **`identity` tool group with `whoami`.** New default-enabled tool
+  group exposing a single `whoami` tool that calls `GET /user` and
+  returns a stable allow-listed subset (`id`, `display_name`,
+  `email`, `first_name`, `last_name`, `role_ids`, `group_ids`,
+  `verified_looker_employee`, `is_disabled`). When the session is
+  sudo-impersonating another user (per-call `act_as_user` argument
+  or `X-User-Token` header), `whoami` returns the impersonated user's
+  record because Looker resolves `GET /user` against the active
+  bearer token. The field allow-list is deliberate: Looker adds new
+  fields to its user response over time, and a permissive default
+  would surface them without a maintainer deciding they're
+  appropriate.
+- **Datagroup administration**: `get_datagroup` (single-datagroup
+  detail with allow-listed fields) and `trigger_datagroup` (sets
+  `triggered_at` to force PDT rebuild *and* cache invalidation
+  simultaneously). `trigger_datagroup` is the missing primitive that
+  distinguishes from `reset_datagroup` — the latter only updates
+  `stale_before` (cache bust without a rebuild).
+- **PDT build administration**: `start_pdt_build`, `check_pdt_build`,
+  `stop_pdt_build`, `graph_derived_tables_for_view`,
+  `graph_derived_tables_for_model`. Per Looker's OpenAPI 4.0 spec,
+  both `start_pdt_build` and `stop_pdt_build` are GET (not POST and
+  DELETE) — the OSS server matches that surprising shape with
+  regression-locking tests. `start_pdt_build` accepts `force_rebuild`
+  and `force_full_incremental` flags plus an optional `workspace`
+  selector for dev/production materialization. `check_pdt_build`
+  returns status + progress ratio + resource usage. The graph tools
+  return DOT-language dependency descriptions, with optional color
+  coding for build state on `graph_derived_tables_for_model`. The
+  README documents canonical *disable PDT workflow* and *enable PDT
+  workflow* recipes that compose these primitives with
+  `update_connection`'s `pdt_api_control_enabled` toggle —
+  intentionally exposed as separate primitive calls rather than a
+  single composite tool so each call emits its own audit line under
+  `act_as_user`.
+- **`LookerSession.get` accepts a per-call `timeout` override.**
+  When set, it replaces the connection-level default for that one
+  request via `httpx.Timeout(timeout)`. Used by `run_lookml_tests`
+  and reusable by custom tools that hit other long-running endpoints.
+- **`ActAsUser` annotation moved from `tools/git.py` to
+  `tools/_helpers.py`** so query, modeling, and git tools can share
+  it without coupling. `_validate_branch_args` and `_maybe_use_branch`
+  helpers also live in `_helpers.py` so any tool that accepts a
+  `branch=…` argument has a one-line adoption path.
+
+### Fixed
+
+- **Full Looker error body preserved on 4xx/5xx responses.**
+  `LookerApiError` now carries an optional `body: dict | None`
+  populated when the response decodes as a JSON object;
+  `format_api_error` surfaces it under `body:` in the result. Looker
+  query failures (e.g. an evaluator error from a malformed
+  `tests.lkml` assert) include the fully compiled SQL and the
+  LookML errors[] array in the body — previously stripped by the
+  formatter, forcing operators to fall back to direct REST or
+  browser DevTools to recover them. Plain-text bodies, JSON arrays,
+  and unparseable bodies all leave `body=None` (the contract is
+  "dict or nothing"). Non-string `message`/`error` fields are
+  defensively coerced into a string for `detail` so downstream
+  string ops never see surprises.
+- **`query_sql` no longer fails on every Looker connection.** The
+  endpoint at `GET /queries/{id}/run/sql` returns `text/plain` (the
+  compiled SQL as a raw string), but the previous code routed
+  through `session.get` (which calls `response.json()`), so the JSON
+  decoder raised before the SQL string could be returned. The fix
+  swaps to `session.get_text`, mirroring the pattern already used by
+  the git deploy-key tools.
+- **`validate_project` previously validated production LookML
+  unconditionally**, silently misleading any CI workflow that called
+  it against a feature branch and expected per-PR diagnostics. The
+  new `dev_mode` and `branch` parameters opt the call into dev-
+  workspace validation; default behavior validates production
+  (preserving backwards-compatibility for existing callers).
+- **Modeling file ops** (`list_project_files`, `get_file`,
+  `create_file`, `update_file`, `delete_file`) migrated from the
+  undocumented `?workspace_id=dev` query-param trick to the
+  canonical session-level `PATCH /session` workspace switch. Read
+  tools default `dev_mode=True` (matching previous behavior); write
+  tools always operate on dev (Looker rejects writes to production).
+  All five accept `branch=…` for atomic save/swap/restore and
+  `act_as_user` for the CI service-user pattern.
+- **`stop_pdt_build` no longer hard-codes `stopped: True`.** The
+  field is now derived from `status == "stopped"` so a no-op stop
+  call (e.g., the materialization had already completed naturally)
+  correctly reports `stopped: False` instead of falsely claiming
+  successful cancellation.
+- **`_validate_branch_args` rejects empty/whitespace branch
+  strings.** Without the guard, an empty `branch` would have been
+  forwarded to `LookerSession.use_branch` and reached Looker as
+  `{"name": ""}` — surfacing as an opaque 400 instead of a clean
+  validation error.
+
 ## [0.15.0] - 2026-05-07
 
 This release adds **per-call admin impersonation** to the git tool
@@ -547,6 +709,10 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.16.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.9.0...v0.10.0
