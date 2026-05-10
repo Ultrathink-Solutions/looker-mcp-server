@@ -85,10 +85,42 @@ class TestQueryWithBranch:
         bodies = [json.loads(c.request.content.decode()) for c in put_branch.calls]
         assert bodies == [{"name": "feature-x"}, {"name": "main"}]
 
+        # Atomicity isn't just call counts — the order matters. A regression
+        # that restored the branch before running the query would still
+        # produce two PUTs with the right bodies; this assertion locks the
+        # actual swap → run → restore sequence so that can't drift silently.
+        events = [(call.request.method, call.request.url.path) for call in respx.calls]
+        swap_idx = next(
+            i
+            for i, (method, path) in enumerate(events)
+            if method == "PUT" and path.endswith("/projects/proj1/git_branch")
+        )
+        run_idx = next(
+            i
+            for i, (method, path) in enumerate(events)
+            if method == "GET" and path.endswith("/queries/q1/run/json")
+        )
+        restore_idx = next(
+            i
+            for i, (method, path) in enumerate(events)
+            if method == "PUT" and path.endswith("/projects/proj1/git_branch") and i > swap_idx
+        )
+        assert swap_idx < run_idx < restore_idx, (
+            f"swap/run/restore must be in order, got events: {events}"
+        )
+
     @pytest.mark.asyncio
     @respx.mock
     async def test_branch_without_project_id_returns_clean_validation_error(self, config):
         _mock_login_logout()
+        # Mock both endpoints we expect NOT to be called — the validation
+        # must short-circuit before any session/query API side effects.
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        create_query = respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(201, json={"id": "q1"})
+        )
 
         mcp, looker_client = create_server(config, enabled_groups={"query"})
         try:
@@ -112,6 +144,11 @@ class TestQueryWithBranch:
                 assert "project_id" in payload["error"]
         finally:
             await looker_client.close()
+
+        # Validation must precede every Looker side effect — neither the
+        # workspace switch nor the query create should have fired.
+        assert not patch_session.called
+        assert not create_query.called
 
     @pytest.mark.asyncio
     @respx.mock
