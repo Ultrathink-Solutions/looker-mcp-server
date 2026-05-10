@@ -7,46 +7,12 @@ saved Looks and dashboards, and searching across all content.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
 
-from ..client import LookerClient, LookerSession, format_api_error
-from ._helpers import ActAsUser
-
-
-def _validate_branch_args(branch: str | None, project_id: str | None) -> None:
-    """Branch swap requires the project ID — Looker scopes branches per
-    project, and ``LookerSession.use_branch`` needs the path segment to
-    issue ``GET/PUT /projects/{id}/git_branch``. Raised as ``ValueError``
-    so it surfaces through ``format_api_error`` as a self-describing
-    validation error rather than an opaque API failure.
-    """
-    if branch is not None and not project_id:
-        raise ValueError(
-            "branch=… requires project_id=…; pass the LookML project ID that "
-            "owns the branch you want to atomically swap to."
-        )
-
-
-@asynccontextmanager
-async def _maybe_use_branch(
-    session: LookerSession, project_id: str | None, branch: str | None
-) -> AsyncGenerator[None, None]:
-    """Wrap the body in ``session.use_branch`` only when ``branch`` is set.
-
-    Tools that take an optional ``branch`` argument don't want to nest
-    yet another ``async with`` for the no-branch case, but they also need
-    the atomic save+restore semantics when a branch IS set. This helper
-    keeps the call site flat in both modes.
-    """
-    if branch is None or project_id is None:
-        yield
-        return
-    async with session.use_branch(project_id, branch):
-        yield
+from ..client import LookerClient, format_api_error
+from ._helpers import ActAsUser, _maybe_use_branch, _validate_branch_args
 
 
 def register_query_tools(server: FastMCP, client: LookerClient) -> None:

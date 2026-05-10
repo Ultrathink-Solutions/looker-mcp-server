@@ -6,8 +6,12 @@ Anything that grows beyond one-liners should move to its own module.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Annotated, Any
 from urllib.parse import quote
+
+from ..client import LookerSession
 
 
 def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
@@ -46,3 +50,50 @@ ACT_AS_USER_DESCRIPTION = (
     "call uses the configured or gateway-provided identity."
 )
 ActAsUser = Annotated[str | None, ACT_AS_USER_DESCRIPTION]
+
+
+def _validate_branch_args(branch: str | None, project_id: str | None) -> None:
+    """Branch swap requires a non-empty project ID and branch name.
+
+    Looker scopes branches per project, and ``LookerSession.use_branch``
+    needs the path segment to issue ``GET/PUT /projects/{id}/git_branch``.
+    Empty/whitespace branch strings would otherwise reach Looker as
+    ``{"name": ""}`` and surface as an opaque 400 — much worse signal
+    than a self-describing ``ValueError`` here. Raised as ``ValueError``
+    so ``format_api_error`` formats it cleanly.
+    """
+    if branch is not None and not branch.strip():
+        raise ValueError(
+            "branch=… must be a non-empty branch name; got an empty or whitespace-only value."
+        )
+    if branch is not None and not project_id:
+        raise ValueError(
+            "branch=… requires project_id=…; pass the LookML project ID that "
+            "owns the branch you want to atomically swap to."
+        )
+
+
+@asynccontextmanager
+async def _maybe_use_branch(
+    session: LookerSession, project_id: str | None, branch: str | None
+) -> AsyncGenerator[None, None]:
+    """Wrap the body in ``session.use_branch`` only when ``branch`` is set.
+
+    Tools that take an optional ``branch`` argument don't want to nest
+    yet another ``async with`` for the no-branch case, but they also need
+    the atomic save+restore semantics when a branch IS set. This helper
+    keeps the call site flat in both modes.
+
+    This is *dispatch* logic, not validation: it decides whether a swap
+    is requested at all. Validity of the requested swap (non-empty
+    branch, non-empty project_id) is enforced upstream by
+    ``_validate_branch_args``. Adding empty-string guards here would
+    silently skip the swap on invalid input rather than fail loud, which
+    is the wrong failure mode — it would mask upstream bugs that forgot
+    to call the validator.
+    """
+    if branch is None or project_id is None:
+        yield
+        return
+    async with session.use_branch(project_id, branch):
+        yield
