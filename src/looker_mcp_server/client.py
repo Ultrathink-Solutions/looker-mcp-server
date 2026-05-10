@@ -11,6 +11,7 @@ import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -114,6 +115,75 @@ class LookerSession:
     ) -> str:
         """POST to an endpoint that returns ``text/plain`` (deploy-key rotation)."""
         return await self._request_text("POST", path, params=params)
+
+    async def update_workspace(self, workspace_id: str) -> None:
+        """Set the active workspace on this API session.
+
+        Looker's session model treats workspace as a per-session property:
+        ``PATCH /session {"workspace_id": "dev"}`` switches into the dev
+        workspace; ``"production"`` switches back. The setting is bound to
+        the bearer token and does not survive logout — every new login
+        starts in production. Calling this method is idempotent (Looker
+        returns the current state regardless of whether the value changed).
+
+        Required prerequisite for any operation that needs the user's dev
+        workspace: branch checkouts, dev-mode file edits, dev-LookML
+        queries, dev-LookML data tests.
+        """
+        await self.patch("/session", body={"workspace_id": workspace_id})
+
+    @asynccontextmanager
+    async def use_branch(self, project_id: str, branch_name: str) -> AsyncGenerator[None, None]:
+        """Atomically swap the project's branch for the duration of the block.
+
+        Reads the dev workspace's currently-checked-out branch on the
+        project, switches to ``branch_name`` for the body, and restores
+        the saved branch in ``finally`` — even if the body raises. This
+        is the safe default for one-shot operations against a feature
+        branch (e.g. CI validating a PR).
+
+        Caller must have already called ``update_workspace("dev")``;
+        Looker rejects branch operations from the production workspace.
+        If the dev workspace is already checked out to ``branch_name``,
+        the swap and the restore are both no-ops.
+
+        The restore is best-effort: if the second PUT fails (network
+        flake, branch deleted concurrently), the failure is logged but
+        does not mask the original exception.
+        """
+        path = f"/projects/{quote(project_id, safe='')}/git_branch"
+        current = await self.get(path)
+        saved = (current or {}).get("name")
+        # Fail fast if Looker returns a malformed/empty payload without a
+        # branch name. Without this guard, the swap would still PUT the
+        # target branch but the restore would PUT ``{"name": None}``,
+        # which Looker would reject — leaving the workspace stuck on the
+        # caller-supplied branch and silently breaking the atomic swap.
+        if not isinstance(saved, str) or not saved:
+            raise LookerApiError(
+                500,
+                "Cannot swap branches",
+                f"Project {project_id!r} returned no current branch name from "
+                "GET /projects/{id}/git_branch — refusing to swap without a "
+                "known restore target.",
+            )
+        if saved == branch_name:
+            yield
+            return
+        await self.put(path, body={"name": branch_name})
+        try:
+            yield
+        finally:
+            try:
+                await self.put(path, body={"name": saved})
+            except Exception as restore_err:  # pragma: no cover — log-only
+                logger.error(
+                    "looker.branch.restore_failed",
+                    project_id=project_id,
+                    saved_branch=saved,
+                    target_branch=branch_name,
+                    error=str(restore_err),
+                )
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
@@ -219,7 +289,12 @@ class LookerClient:
     # ── Public API ───────────────────────────────────────────────────
 
     @asynccontextmanager
-    async def session(self, context: RequestContext) -> AsyncGenerator[LookerSession, None]:
+    async def session(
+        self,
+        context: RequestContext,
+        *,
+        dev_mode: bool = False,
+    ) -> AsyncGenerator[LookerSession, None]:
         """Create an ephemeral authenticated session for a tool invocation.
 
         The session lifecycle depends on the resolved identity mode:
@@ -227,6 +302,13 @@ class LookerClient:
         - **api_key**: login with client credentials → yield → logout
         - **sudo**: admin login → login_user → yield → logout sudo → logout admin
         - **oauth**: use pre-obtained token directly → yield (no login/logout)
+
+        When ``dev_mode=True``, the session is switched into the dev
+        workspace via ``PATCH /session`` immediately after authentication.
+        Looker scopes workspace selection to the bearer token, so this
+        affects every subsequent call routed through the yielded
+        ``LookerSession``. Required for branch checkouts, dev-mode file
+        edits, dev-LookML queries, and dev-LookML data tests.
         """
         identity = await self._identity_provider.resolve(context)
         log = logger.bind(mode=identity.mode, tool=context.tool_name)
@@ -236,7 +318,10 @@ class LookerClient:
                 token = await self._login(identity.client_id, identity.client_secret)
                 log.debug("looker.session.created")
                 try:
-                    yield LookerSession(self._http, token)
+                    session = LookerSession(self._http, token)
+                    if dev_mode:
+                        await session.update_workspace("dev")
+                    yield session
                 finally:
                     await self._logout(token)
 
@@ -271,7 +356,10 @@ class LookerClient:
                             configured_user=identity.client_id,
                         )
                     try:
-                        yield LookerSession(self._http, sudo_token)
+                        session = LookerSession(self._http, sudo_token)
+                        if dev_mode:
+                            await session.update_workspace("dev")
+                        yield session
                     finally:
                         await self._logout(sudo_token)
                 finally:
@@ -281,7 +369,10 @@ class LookerClient:
                 if not identity.access_token:
                     raise ValueError("OAuth identity resolved without an access token.")
                 log.debug("looker.session.oauth")
-                yield LookerSession(self._http, identity.access_token)
+                session = LookerSession(self._http, identity.access_token)
+                if dev_mode:
+                    await session.update_workspace("dev")
+                yield session
 
             case _:
                 raise ValueError(f"Unknown identity mode: {identity.mode!r}")
