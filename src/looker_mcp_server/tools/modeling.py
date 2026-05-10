@@ -514,6 +514,152 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("validate_project", e)
 
+    # ── LookML data tests ────────────────────────────────────────────
+
+    @server.tool(
+        description=(
+            "List the LookML/data tests defined in a project. Each entry has a "
+            "``name``, ``model``, ``explore``, ``file``, ``line``, and the "
+            "``query_url_params`` Looker uses to run it. By default lists tests "
+            "from production LookML; set ``branch=…`` (or ``dev_mode=True``) to "
+            "list tests from a feature branch under review."
+        ),
+    )
+    async def list_lookml_tests(
+        project_id: Annotated[str, "LookML project ID"],
+        file_id: Annotated[
+            str | None, "Optional: restrict to tests defined in a single file"
+        ] = None,
+        dev_mode: Annotated[
+            bool,
+            "List tests from the dev workspace rather than production. "
+            "Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Atomically swap to this branch for the call (saved branch restored "
+            "on exit). Implies dev_mode=True.",
+        ] = None,
+        act_as_user: ActAsUser = None,
+    ) -> str:
+        ctx = client.build_context(
+            "list_lookml_tests",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
+        try:
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    params: dict[str, Any] = {}
+                    _set_if(params, "file_id", file_id)
+                    tests = await session.get(
+                        f"/projects/{_path_seg(project_id)}/lookml_tests",
+                        params=params or None,
+                    )
+                    result = [
+                        {
+                            "name": t.get("name"),
+                            "model": t.get("model_name"),
+                            "explore": t.get("explore_name"),
+                            "file": t.get("file"),
+                            "line": t.get("line"),
+                            "query_url_params": t.get("query_url_params"),
+                        }
+                        for t in (tests or [])
+                    ]
+                    return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_lookml_tests", e)
+
+    @server.tool(
+        description=(
+            "Run LookML/data tests for a project and return the assertion "
+            "results. Optionally filter by ``model``, ``test`` (by name), or "
+            "``file_id``. By default runs against production LookML — set "
+            "``branch=…`` (or ``dev_mode=True``) to validate a PR's tests "
+            "against the warehouse data without deploying. This is the "
+            "primary primitive for catching data-regression bugs in CI."
+            "\n\nLooker compiles each test's ``explore_source`` query, runs "
+            "it against the warehouse, and evaluates the assertion expression "
+            "against the result rows. A failed assert returns a non-empty "
+            "``errors[]`` array. Tests can take many minutes — the default "
+            "per-call timeout is 1800s (30 min), matching what Spectacles "
+            "uses for the same endpoint."
+        ),
+    )
+    async def run_lookml_tests(
+        project_id: Annotated[str, "LookML project ID"],
+        model: Annotated[str | None, "Restrict to tests in a specific model"] = None,
+        test: Annotated[str | None, "Restrict to a single test by name"] = None,
+        file_id: Annotated[str | None, "Restrict to tests in a single file"] = None,
+        dev_mode: Annotated[
+            bool,
+            "Run tests against the dev workspace's LookML rather than production. "
+            "Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Atomically swap to this branch for the call (saved branch restored "
+            "on exit). Implies dev_mode=True.",
+        ] = None,
+        act_as_user: ActAsUser = None,
+        timeout: Annotated[
+            float,
+            "Per-call timeout in seconds. Defaults to 1800 (30 min) because "
+            "data tests run real warehouse queries with assertions and can "
+            "take a long time on large tables.",
+        ] = 1800.0,
+    ) -> str:
+        ctx = client.build_context(
+            "run_lookml_tests",
+            "modeling",
+            {
+                "project_id": project_id,
+                "model": model,
+                "test": test,
+                "branch": branch,
+                "act_as_user": act_as_user,
+            },
+        )
+        try:
+            _validate_branch_args(branch, project_id)
+            # ``httpx.Timeout(0)`` raises ``ValueError`` and negative values
+            # produce undefined behavior — both surface as opaque transport
+            # errors well after authentication and workspace setup. Catch
+            # at the validation layer so callers see a deterministic
+            # ``ValueError`` before any Looker side effects.
+            if timeout <= 0:
+                raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}.")
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    params: dict[str, Any] = {}
+                    _set_if(params, "model", model)
+                    _set_if(params, "test", test)
+                    _set_if(params, "file_id", file_id)
+                    results = await session.get(
+                        f"/projects/{_path_seg(project_id)}/lookml_tests/run",
+                        params=params or None,
+                        timeout=timeout,
+                    )
+                    # Pass through raw results — failures carry assertion-level
+                    # detail (model_name, test_name, query_url, success,
+                    # errors[]) that's exactly what a regression report needs.
+                    failure_count = sum(1 for r in (results or []) if not r.get("success", True))
+                    return json.dumps(
+                        {
+                            "passed": failure_count == 0,
+                            "test_count": len(results or []),
+                            "failure_count": failure_count,
+                            "results": results or [],
+                        },
+                        indent=2,
+                    )
+        except Exception as e:
+            return format_api_error("run_lookml_tests", e)
+
     # ── Datagroups (cache management) ────────────────────────────────
 
     @server.tool(

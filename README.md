@@ -347,7 +347,14 @@ For parallel PR validation, provision multiple Looker users (e.g. `ci-bot-1`, `c
 | **query** | `query`, `query_sql`, `query_url`, `run_look` (default `dev_mode=False`; opt in via `branch=` or `dev_mode=True`) | `run_dashboard`, `search_content` (production content) |
 | **modeling — file ops** | `list_project_files`, `get_file` (default `dev_mode=True`), `create_file`, `update_file`, `delete_file` (always dev — Looker rejects writes to production) | — |
 | **modeling — validation** | `validate_project` (default `dev_mode=False`; opt in via `branch=` for PR validation) | — |
+| **modeling — data tests** | `list_lookml_tests`, `run_lookml_tests` (default `dev_mode=False`; opt in via `branch=` for PR data-regression checks) | — |
 | **modeling — project metadata** | — | `list_projects`, `get_project`, `get_project_manifest`, `list_datagroups`, `reset_datagroup` (workspace-agnostic project state) |
+
+### `run_lookml_tests` — PR data-regression checks
+
+`run_lookml_tests(project_id="ecommerce", branch="feature-x", act_as_user="ci-bot@example.com")` is the primary primitive for catching data-regression bugs introduced by a PR. Looker compiles each test's `explore_source` query, runs it against the warehouse, and evaluates the assertion expression against the result rows. Failures come back with assertion-level detail (`model_name`, `test_name`, `errors[]`).
+
+Default per-call timeout is 1800s (30 min) because data tests run real warehouse queries with assertions and can take a long time on large tables — same default Spectacles uses.
 
 ## Extending with Custom Identity Providers
 
