@@ -279,6 +279,31 @@ class TestUseBranch:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_raises_when_current_branch_name_missing(self):
+        # Defense against a Looker payload that omits ``name``: the swap
+        # would silently put the workspace on the target branch, then
+        # restore with ``{"name": None}`` (which Looker rejects), leaving
+        # the workspace stuck on the caller-supplied branch. We fail fast
+        # before the swap so atomic semantics aren't quietly broken.
+        api_url = "https://test.looker.com/api/4.0"
+        respx.get(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={})  # no "name" key
+        )
+        # PUT should NEVER be called — failure must precede any state mutation.
+        put_route = respx.put(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "tok")
+            with pytest.raises(LookerApiError) as exc_info:
+                async with session.use_branch("myproj", "feature-x"):
+                    pass
+            assert "no current branch name" in exc_info.value.detail
+        assert put_route.call_count == 0
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_no_op_when_already_on_target_branch(self):
         api_url = "https://test.looker.com/api/4.0"
         respx.get(f"{api_url}/projects/myproj/git_branch").mock(

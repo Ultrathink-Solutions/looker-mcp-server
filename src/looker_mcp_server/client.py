@@ -142,6 +142,19 @@ class LookerSession:
         path = f"/projects/{quote(project_id, safe='')}/git_branch"
         current = await self.get(path)
         saved = (current or {}).get("name")
+        # Fail fast if Looker returns a malformed/empty payload without a
+        # branch name. Without this guard, the swap would still PUT the
+        # target branch but the restore would PUT ``{"name": None}``,
+        # which Looker would reject — leaving the workspace stuck on the
+        # caller-supplied branch and silently breaking the atomic swap.
+        if not isinstance(saved, str) or not saved:
+            raise LookerApiError(
+                500,
+                "Cannot swap branches",
+                f"Project {project_id!r} returned no current branch name from "
+                "GET /projects/{id}/git_branch — refusing to swap without a "
+                "known restore target.",
+            )
         if saved == branch_name:
             yield
             return

@@ -287,7 +287,7 @@ Set `branch="<feature-branch>"` and `project_id="<lookml-project>"` on a query t
 ```jsonc
 {
   "tool": "query",
-  "args": {
+  "arguments": {
     "model": "ecommerce",
     "view": "orders",
     "fields": ["orders.region", "orders.total_revenue"],
@@ -301,20 +301,20 @@ Set `branch="<feature-branch>"` and `project_id="<lookml-project>"` on a query t
 **Production vs. PR comparison.** Two calls — the LLM diffs the results in its own context.
 
 ```jsonc
-{ "tool": "query", "args": { "model": "ecommerce", "view": "orders", "fields": [...] } }
-{ "tool": "query", "args": { "model": "ecommerce", "view": "orders", "fields": [...],
-                              "branch": "feature/new-aggregation", "project_id": "ecommerce",
-                              "act_as_user": "ci-bot@example.com" } }
+{ "tool": "query", "arguments": { "model": "ecommerce", "view": "orders", "fields": [...] } }
+{ "tool": "query", "arguments": { "model": "ecommerce", "view": "orders", "fields": [...],
+                                   "branch": "feature/new-aggregation", "project_id": "ecommerce",
+                                   "act_as_user": "ci-bot@example.com" } }
 ```
 
 **Iterative human debug.** The branch state is sticky in the dev workspace, so set it once with `switch_git_branch` and run multiple queries with `dev_mode=True` (no `branch` arg). Restore the user's normal branch with another `switch_git_branch` when done.
 
 ```jsonc
-{ "tool": "switch_git_branch", "args": { "project_id": "ecommerce", "branch_name": "feature/new-aggregation" } }
-{ "tool": "query",             "args": { "model": "ecommerce", "view": "orders", "fields": [...], "dev_mode": true } }
-{ "tool": "update_lookml_file", "args": { ... } }
-{ "tool": "query",             "args": { "model": "ecommerce", "view": "orders", "fields": [...], "dev_mode": true } }
-{ "tool": "switch_git_branch", "args": { "project_id": "ecommerce", "branch_name": "main" } }
+{ "tool": "switch_git_branch", "arguments": { "project_id": "ecommerce", "branch_name": "feature/new-aggregation" } }
+{ "tool": "query",             "arguments": { "model": "ecommerce", "view": "orders", "fields": [...], "dev_mode": true } }
+{ "tool": "update_lookml_file", "arguments": { ... } }
+{ "tool": "query",             "arguments": { "model": "ecommerce", "view": "orders", "fields": [...], "dev_mode": true } }
+{ "tool": "switch_git_branch", "arguments": { "project_id": "ecommerce", "branch_name": "main" } }
 ```
 
 **Cleanup another user's stuck dev workspace.** Combine `act_as_user` with the git tools to operate on someone else's per-user state.
@@ -322,7 +322,7 @@ Set `branch="<feature-branch>"` and `project_id="<lookml-project>"` on a query t
 ```jsonc
 {
   "tool": "switch_git_branch",
-  "args": { "project_id": "ecommerce", "branch_name": "main", "act_as_user": "alice@example.com" }
+  "arguments": { "project_id": "ecommerce", "branch_name": "main", "act_as_user": "alice@example.com" }
 }
 ```
 
