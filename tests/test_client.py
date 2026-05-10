@@ -119,6 +119,27 @@ class TestLookerSession:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_error_with_non_string_message_coerces_detail_to_string(self):
+        # If Looker ever returns a non-string ``message`` (e.g. a nested
+        # error object), ``detail`` must remain a string for downstream
+        # consumers. The full payload is still preserved on ``body``.
+        api_url = "https://test.looker.com/api/4.0"
+        full_body = {
+            "message": {"code": "X1", "text": "structured error"},
+            "errors": [{"message": "downstream"}],
+        }
+        respx.get(f"{api_url}/something").mock(return_value=httpx.Response(400, json=full_body))
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            with pytest.raises(LookerApiError) as exc_info:
+                await session.get("/something")
+            assert isinstance(exc_info.value.detail, str)
+            assert "structured error" in exc_info.value.detail
+            # Full structured payload still accessible via body.
+            assert exc_info.value.body == full_body
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_delete_returns_none(self):
         api_url = "https://test.looker.com/api/4.0"
         respx.delete(f"{api_url}/resource/1").mock(return_value=httpx.Response(204))

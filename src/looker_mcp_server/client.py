@@ -141,7 +141,15 @@ class LookerSession:
         else:
             if isinstance(parsed, dict):
                 body = parsed
-                detail = parsed.get("message", "") or parsed.get("error", "")
+                # ``detail`` is part of the public ``LookerApiError`` /
+                # ``format_api_error`` shape and consumers expect a string.
+                # Looker normally returns ``message``/``error`` as strings,
+                # but a non-conforming payload (nested object/array under
+                # those keys) would otherwise leak a non-string and break
+                # downstream string ops. Coerce defensively; the full
+                # structured payload is still available via ``body``.
+                hint = parsed.get("message") or parsed.get("error") or ""
+                detail = hint if isinstance(hint, str) else json.dumps(hint)[:500]
             else:
                 # Looker occasionally returns JSON arrays / scalars on error.
                 # Stringify to keep ``detail`` populated; don't carry through
