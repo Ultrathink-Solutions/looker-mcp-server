@@ -172,6 +172,148 @@ class TestLookerClientApiKey:
 
         await client.close()
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_dev_mode_patches_session_workspace(self, config):
+        api_url = config.api_url
+        respx.post(f"{api_url}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "sess-token"})
+        )
+        # The contract: when ``dev_mode=True``, PATCH /session is called
+        # with workspace_id=dev before the body runs. Without it, branch
+        # operations would fail with "Developer mode required".
+        patch_route = respx.patch(f"{api_url}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        respx.delete(f"{api_url}/logout").mock(return_value=httpx.Response(204))
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = RequestContext(tool_name="t", tool_group="g")
+
+        async with client.session(ctx, dev_mode=True):
+            pass
+
+        assert patch_route.called
+        body = json.loads(patch_route.calls[0].request.content.decode())
+        assert body == {"workspace_id": "dev"}
+        await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_default_session_does_not_patch_workspace(self, config):
+        api_url = config.api_url
+        respx.post(f"{api_url}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "sess-token"})
+        )
+        patch_route = respx.patch(f"{api_url}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        respx.delete(f"{api_url}/logout").mock(return_value=httpx.Response(204))
+
+        provider = ApiKeyIdentityProvider("test-id", "test-secret")
+        client = LookerClient(config, provider)
+        ctx = RequestContext(tool_name="t", tool_group="g")
+
+        async with client.session(ctx):
+            pass
+
+        # Default ``dev_mode=False`` must NOT issue PATCH /session — Looker
+        # sessions default to production workspace and that's the right
+        # behavior for non-dev-mode tools.
+        assert not patch_route.called
+        await client.close()
+
+
+class TestUseBranch:
+    """``LookerSession.use_branch`` performs an in-session save → PUT
+    target → yield → PUT saved cycle. The save+restore is what makes
+    ``query(branch=…)`` safe for one-shot CI validation: even if the
+    body raises, the workspace state is restored to whatever was checked
+    out before the call."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_save_swap_restore_on_success(self):
+        api_url = "https://test.looker.com/api/4.0"
+        # GET current branch returns the saved name
+        respx.get(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+        # Two PUTs: one to feature-x (the swap), one back to main (the restore)
+        put_route = respx.put(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "tok")
+            async with session.use_branch("myproj", "feature-x"):
+                pass
+
+        # Two PUT calls: swap then restore.
+        assert put_route.call_count == 2
+        bodies = [json.loads(c.request.content.decode()) for c in put_route.calls]
+        assert bodies == [{"name": "feature-x"}, {"name": "main"}]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_restore_runs_in_finally_when_body_raises(self):
+        api_url = "https://test.looker.com/api/4.0"
+        respx.get(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+        put_route = respx.put(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "tok")
+            with pytest.raises(RuntimeError, match="boom"):
+                async with session.use_branch("myproj", "feature-x"):
+                    raise RuntimeError("boom")
+
+        # Both swap AND restore happened despite the exception.
+        assert put_route.call_count == 2
+        bodies = [json.loads(c.request.content.decode()) for c in put_route.calls]
+        assert bodies[1] == {"name": "main"}, "restore must run in finally"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_no_op_when_already_on_target_branch(self):
+        api_url = "https://test.looker.com/api/4.0"
+        respx.get(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+        put_route = respx.put(f"{api_url}/projects/myproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "tok")
+            async with session.use_branch("myproj", "feature-x"):
+                pass
+
+        # No swap, no restore — the branch was already where we wanted it.
+        assert put_route.call_count == 0
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_project_id_with_slash_is_path_encoded(self):
+        api_url = "https://test.looker.com/api/4.0"
+        # ``my/proj`` must be percent-encoded as ``my%2Fproj`` so it doesn't
+        # misroute as a sub-path.
+        respx.get(f"{api_url}/projects/my%2Fproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+        respx.put(f"{api_url}/projects/my%2Fproj/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "tok")
+            async with session.use_branch("my/proj", "feature-x"):
+                pass
+
 
 class TestLookerClientSudo:
     @pytest.mark.asyncio

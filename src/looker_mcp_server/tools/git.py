@@ -15,22 +15,7 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
-from ._helpers import _path_seg
-
-# Per-call admin impersonation. The MCP forwards capability — Looker
-# enforces whether the configured admin credentials may impersonate
-# (HTTP 403 if not). Email values are resolved via Looker's user-search
-# API; numeric values are used directly. ``ArgumentSudoIdentityProvider``
-# in :mod:`..identity` notices this argument and rewrites the resolved
-# identity to a sudo session targeting ``act_as_user``.
-ACT_AS_USER_DESCRIPTION = (
-    "Optional Looker user ID or email to impersonate for this call. "
-    "Use to clean up another user's dev workspace (Looker dev mode is "
-    "per-user-isolated). Requires sudo capability on the configured "
-    "admin credentials. When omitted, the call uses the configured or "
-    "gateway-provided identity."
-)
-ActAsUser = Annotated[str | None, ACT_AS_USER_DESCRIPTION]
+from ._helpers import ActAsUser, _path_seg
 
 
 def register_git_tools(server: FastMCP, client: LookerClient) -> None:
@@ -131,7 +116,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "Create a new Git branch in a LookML project. "
-            "The branch is created from the current ref."
+            "The branch is created from the current ref. Requires Looker dev mode."
         ),
     )
     async def create_git_branch(
@@ -146,7 +131,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
             {"project_id": project_id, "act_as_user": act_as_user},
         )
         try:
-            async with client.session(ctx) as session:
+            async with client.session(ctx, dev_mode=True) as session:
                 body: dict[str, Any] = {"name": branch_name}
                 if ref:
                     body["ref"] = ref
@@ -162,7 +147,12 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Switch to a different Git branch in a LookML project. Requires dev mode to be enabled."
+            "Switch to a different Git branch in a LookML project. Operates "
+            "on the user's dev workspace (per-Looker-user, per-project). The "
+            "switch persists server-side until another switch is made — "
+            "remember to switch back to a known-good branch when done with "
+            "iterative work, or pair this with subsequent calls that include "
+            "branch=… for atomic save/restore semantics."
         ),
     )
     async def switch_git_branch(
@@ -176,7 +166,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
             {"project_id": project_id, "act_as_user": act_as_user},
         )
         try:
-            async with client.session(ctx) as session:
+            async with client.session(ctx, dev_mode=True) as session:
                 branch = await session.put(
                     f"/projects/{_path_seg(project_id)}/git_branch",
                     body={"name": branch_name},
@@ -215,7 +205,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
             },
         )
         try:
-            async with client.session(ctx) as session:
+            async with client.session(ctx, dev_mode=True) as session:
                 await session.delete(
                     f"/projects/{_path_seg(project_id)}/git_branch/{_path_seg(branch_name)}"
                 )
@@ -291,7 +281,7 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
             {"project_id": project_id, "act_as_user": act_as_user},
         )
         try:
-            async with client.session(ctx) as session:
+            async with client.session(ctx, dev_mode=True) as session:
                 result = await session.post(
                     f"/projects/{_path_seg(project_id)}/reset_to_production"
                 )

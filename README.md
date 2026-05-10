@@ -235,7 +235,7 @@ The git tools accept an optional `act_as_user` argument so an admin can perform 
 
 **Security model.** The MCP forwards capability — it does not gate it. Sudo permission is enforced by Looker server-side: if the configured `LOOKER_CLIENT_ID` does not have sudo capability, `login_user` returns HTTP 403 and the tool fails. There is no MCP-side "who may impersonate whom" policy in the open-source server; layer one in via a wrapping `IdentityProvider` if you need it (see the next section).
 
-**Tool coverage (v1).** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
+**Tool coverage.** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. The four query tools accept it too — `query`, `query_sql`, `query_url`, `run_look` — for the CI pattern where queries against a feature branch must run under a dedicated service user's dev workspace rather than the calling admin's. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
 
 **Audit log.** Every argument-driven sudo emits an INFO-level structlog line:
 
@@ -260,6 +260,82 @@ This is independent of the trace-level `looker.session.sudo` debug line and is t
 - Email does not match any Looker user → validation error. Fail-loud is deliberate; silently falling back to the configured identity would let a typo'd email run the action under the wrong user.
 - `LOOKER_SUDO_AS_USER=false` and `act_as_user` is passed → validation error explaining how to fix (enable sudo or remove the argument).
 - Configured credentials lack sudo capability → Looker returns 403 on `login_user`, surfaced as `Permission denied — the current user lacks access.`
+
+## Dev Mode and Branch Validation
+
+The query tools (`query`, `query_sql`, `query_url`, `run_look`) and the modeling/git tools accept three optional arguments — `dev_mode`, `branch`, and `project_id` — that together let you run operations against the LookML in a Looker dev workspace rather than production. This is what makes feature-branch validation possible from the MCP without falling back to raw REST.
+
+**How Looker scopes workspaces.** Workspace selection (production vs. dev) is a property of the API session token, not the call. The MCP issues `PATCH /session {"workspace_id": "dev"}` immediately after authentication when `dev_mode=True` is set; this affects every subsequent call routed through the same session. The setting does not persist across logins, so each MCP call sets it explicitly.
+
+**Branch state is per-Looker-user, server-side.** Each Looker user has exactly one dev workspace, with one currently-checked-out branch per LookML project. The branch checkout persists across logouts and concurrent calls — it's mutable shared state on Looker's server. Two operations against the same user fight over this single cell.
+
+### Atomic branch swap
+
+Set `branch="<feature-branch>"` and `project_id="<lookml-project>"` on a query tool to atomically:
+
+1. Save the user's currently-checked-out branch on the project.
+2. PUT the target branch.
+3. Run the query.
+4. Restore the saved branch in `finally` (even if the query raises).
+
+`branch` implies `dev_mode=True`. The save and restore are no-ops when the dev workspace is already on the target branch.
+
+### Canonical workflows
+
+**One-shot CI: validate a PR's LookML against real data.** Single tool call, atomic. The dedicated CI service user's dev workspace is borrowed for the duration; the saved branch is restored before the call returns.
+
+```jsonc
+{
+  "tool": "query",
+  "args": {
+    "model": "ecommerce",
+    "view": "orders",
+    "fields": ["orders.region", "orders.total_revenue"],
+    "branch": "feature/new-aggregation",
+    "project_id": "ecommerce",
+    "act_as_user": "ci-bot@example.com"
+  }
+}
+```
+
+**Production vs. PR comparison.** Two calls — the LLM diffs the results in its own context.
+
+```jsonc
+{ "tool": "query", "args": { "model": "ecommerce", "view": "orders", "fields": [...] } }
+{ "tool": "query", "args": { "model": "ecommerce", "view": "orders", "fields": [...],
+                              "branch": "feature/new-aggregation", "project_id": "ecommerce",
+                              "act_as_user": "ci-bot@example.com" } }
+```
+
+**Iterative human debug.** The branch state is sticky in the dev workspace, so set it once with `switch_git_branch` and run multiple queries with `dev_mode=True` (no `branch` arg). Restore the user's normal branch with another `switch_git_branch` when done.
+
+```jsonc
+{ "tool": "switch_git_branch", "args": { "project_id": "ecommerce", "branch_name": "feature/new-aggregation" } }
+{ "tool": "query",             "args": { "model": "ecommerce", "view": "orders", "fields": [...], "dev_mode": true } }
+{ "tool": "update_lookml_file", "args": { ... } }
+{ "tool": "query",             "args": { "model": "ecommerce", "view": "orders", "fields": [...], "dev_mode": true } }
+{ "tool": "switch_git_branch", "args": { "project_id": "ecommerce", "branch_name": "main" } }
+```
+
+**Cleanup another user's stuck dev workspace.** Combine `act_as_user` with the git tools to operate on someone else's per-user state.
+
+```jsonc
+{
+  "tool": "switch_git_branch",
+  "args": { "project_id": "ecommerce", "branch_name": "main", "act_as_user": "alice@example.com" }
+}
+```
+
+### Concurrency caveat
+
+Looker's per-user-per-project branch checkout is a single mutable cell. Two concurrent operations on the same `act_as_user` (or the same configured admin identity, when `act_as_user` is omitted) race on it. The atomic save+restore prevents accidental state leaks, but it does **not** serialize concurrent calls — if your CI fans out across many open PRs against a single ci-bot user, you'll see non-deterministic results.
+
+For parallel PR validation, provision multiple Looker users (e.g. `ci-bot-1`, `ci-bot-2`, …) and have your CI fan-out logic rotate through them via `act_as_user`. There is no MCP-side mutex; this is an operational choice the deployer makes.
+
+### What `dev_mode` does *not* cover (v1)
+
+- **Multi-project manifest imports.** If your LookML project imports another project, the import stays on whatever branch is currently checked out in the dev workspace for that imported project. The atomic swap is single-project; recursive manifest-aware swapping is a v2 concern.
+- **Cross-call session continuity.** Each tool call gets its own ephemeral API session (login → operation → logout), so `dev_mode=True` only takes effect within a single call. The branch state persists across calls because Looker stores it server-side per-user; the workspace setting does not.
 
 ## Extending with Custom Identity Providers
 

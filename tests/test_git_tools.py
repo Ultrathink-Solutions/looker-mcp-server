@@ -58,6 +58,12 @@ def _mock_login_logout():
         return_value=httpx.Response(200, json={"access_token": "sess-token"})
     )
     respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+    # Dev-mode-required tools (switch/create/delete branch, reset_to_production)
+    # call ``update_workspace("dev")`` immediately after login. Mock the
+    # session-update endpoint so respx doesn't reject it as un-mocked.
+    respx.patch(f"{API_URL}/session").mock(
+        return_value=httpx.Response(200, json={"workspace_id": "dev"})
+    )
 
 
 def _invoke_tool(mcp, tool_name: str, args: dict):
@@ -395,6 +401,10 @@ class TestActAsUser:
             return_value=httpx.Response(200, json={"access_token": "sudo-tok"})
         )
         respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        # delete_git_branch enables dev_mode, which triggers PATCH /session.
+        respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
         delete_route = respx.delete(f"{API_URL}/projects/p1/git_branch/tmp_ci_abc").mock(
             return_value=httpx.Response(204)
         )
@@ -436,6 +446,10 @@ class TestActAsUser:
             return_value=httpx.Response(200, json={"access_token": "sudo-tok"})
         )
         respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        # delete_git_branch enables dev_mode, which triggers PATCH /session.
+        respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
         delete_route = respx.delete(f"{API_URL}/projects/p1/git_branch/tmp_ci_abc").mock(
             return_value=httpx.Response(204)
         )

@@ -7,11 +7,46 @@ saved Looks and dashboards, and searching across all content.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
 
-from ..client import LookerClient, format_api_error
+from ..client import LookerClient, LookerSession, format_api_error
+from ._helpers import ActAsUser
+
+
+def _validate_branch_args(branch: str | None, project_id: str | None) -> None:
+    """Branch swap requires the project ID — Looker scopes branches per
+    project, and ``LookerSession.use_branch`` needs the path segment to
+    issue ``GET/PUT /projects/{id}/git_branch``. Raised as ``ValueError``
+    so it surfaces through ``format_api_error`` as a self-describing
+    validation error rather than an opaque API failure.
+    """
+    if branch is not None and not project_id:
+        raise ValueError(
+            "branch=… requires project_id=…; pass the LookML project ID that "
+            "owns the branch you want to atomically swap to."
+        )
+
+
+@asynccontextmanager
+async def _maybe_use_branch(
+    session: LookerSession, project_id: str | None, branch: str | None
+) -> AsyncGenerator[None, None]:
+    """Wrap the body in ``session.use_branch`` only when ``branch`` is set.
+
+    Tools that take an optional ``branch`` argument don't want to nest
+    yet another ``async with`` for the no-branch case, but they also need
+    the atomic save+restore semantics when a branch IS set. This helper
+    keeps the call site flat in both modes.
+    """
+    if branch is None or project_id is None:
+        yield
+        return
+    async with session.use_branch(project_id, branch):
+        yield
 
 
 def register_query_tools(server: FastMCP, client: LookerClient) -> None:
@@ -43,31 +78,62 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             str,
             "Output format: 'json' (default), 'json_detail', 'csv', 'txt'",
         ] = "json",
+        dev_mode: Annotated[
+            bool,
+            "Run against the dev workspace's currently-checked-out LookML "
+            "rather than production. Required when validating in-progress "
+            "branch edits. Implied automatically when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call. The dev "
+            "workspace's saved branch is restored when the call completes "
+            "(success or failure). Implies dev_mode=True; requires project_id.",
+        ] = None,
+        project_id: Annotated[
+            str | None,
+            "LookML project ID — required when ``branch`` is set so the "
+            "MCP knows which project's branch state to swap.",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("query", "query", {"model": model, "view": view})
+        ctx = client.build_context(
+            "query",
+            "query",
+            {
+                "model": model,
+                "view": view,
+                "branch": branch,
+                "project_id": project_id,
+                "act_as_user": act_as_user,
+            },
+        )
         try:
-            async with client.session(ctx) as session:
-                body: dict[str, Any] = {
-                    "model": model,
-                    "view": view,
-                    "fields": fields,
-                    "limit": str(limit),
-                }
-                if filters:
-                    body["filters"] = filters
-                if sorts:
-                    body["sorts"] = sorts
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    body: dict[str, Any] = {
+                        "model": model,
+                        "view": view,
+                        "fields": fields,
+                        "limit": str(limit),
+                    }
+                    if filters:
+                        body["filters"] = filters
+                    if sorts:
+                        body["sorts"] = sorts
 
-                query_def = await session.post("/queries", body=body)
-                query_id = query_def["id"]
+                    query_def = await session.post("/queries", body=body)
+                    query_id = query_def["id"]
 
-                result = await session.get(f"/queries/{query_id}/run/{result_format}")
-                if isinstance(result, list):
-                    return json.dumps(
-                        {"row_count": len(result), "data": result},
-                        indent=2,
-                    )
-                return json.dumps(result, indent=2)
+                    result = await session.get(f"/queries/{query_id}/run/{result_format}")
+                    if isinstance(result, list):
+                        return json.dumps(
+                            {"row_count": len(result), "data": result},
+                            indent=2,
+                        )
+                    return json.dumps(result, indent=2)
         except Exception as e:
             return format_api_error("query", e)
 
@@ -84,30 +150,55 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         filters: Annotated[dict[str, str] | None, "Filter expressions"] = None,
         sorts: Annotated[list[str] | None, "Sort expressions"] = None,
         limit: Annotated[int, "Maximum rows"] = 500,
+        dev_mode: Annotated[
+            bool,
+            "Compile the SQL against the dev workspace's LookML rather "
+            "than production. Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call (saved "
+            "branch restored on exit). Requires project_id.",
+        ] = None,
+        project_id: Annotated[str | None, "LookML project ID — required with ``branch``"] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("query_sql", "query", {"model": model, "view": view})
+        ctx = client.build_context(
+            "query_sql",
+            "query",
+            {
+                "model": model,
+                "view": view,
+                "branch": branch,
+                "project_id": project_id,
+                "act_as_user": act_as_user,
+            },
+        )
         try:
-            async with client.session(ctx) as session:
-                body: dict[str, Any] = {
-                    "model": model,
-                    "view": view,
-                    "fields": fields,
-                    "limit": str(limit),
-                }
-                if filters:
-                    body["filters"] = filters
-                if sorts:
-                    body["sorts"] = sorts
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    body: dict[str, Any] = {
+                        "model": model,
+                        "view": view,
+                        "fields": fields,
+                        "limit": str(limit),
+                    }
+                    if filters:
+                        body["filters"] = filters
+                    if sorts:
+                        body["sorts"] = sorts
 
-                query_def = await session.post("/queries", body=body)
-                query_id = query_def["id"]
+                    query_def = await session.post("/queries", body=body)
+                    query_id = query_def["id"]
 
-                # Looker returns the compiled SQL as text/plain; calling
-                # session.get would route through response.json() and raise
-                # ``Expecting value: line 1 column 1 (char 0)``. Mirrors the
-                # pattern used by the git deploy-key tools.
-                result = await session.get_text(f"/queries/{query_id}/run/sql")
-                return json.dumps({"sql": result}, indent=2)
+                    # Looker returns the compiled SQL as text/plain; calling
+                    # session.get would route through response.json() and raise
+                    # ``Expecting value: line 1 column 1 (char 0)``. Mirrors the
+                    # pattern used by the git deploy-key tools.
+                    result = await session.get_text(f"/queries/{query_id}/run/sql")
+                    return json.dumps({"sql": result}, indent=2)
         except Exception as e:
             return format_api_error("query_sql", e)
 
@@ -121,20 +212,47 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         look_id: Annotated[str, "ID of the saved Look"],
         result_format: Annotated[str, "Output format: 'json', 'csv', 'txt'"] = "json",
         limit: Annotated[int, "Maximum rows to return"] = 500,
+        dev_mode: Annotated[
+            bool,
+            "Resolve the Look's model+explore against the dev workspace's "
+            "LookML rather than production. Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call (saved "
+            "branch restored on exit). Requires project_id.",
+        ] = None,
+        project_id: Annotated[
+            str | None,
+            "LookML project ID owning the Look's model — required with ``branch``",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("run_look", "query", {"look_id": look_id})
+        ctx = client.build_context(
+            "run_look",
+            "query",
+            {
+                "look_id": look_id,
+                "branch": branch,
+                "project_id": project_id,
+                "act_as_user": act_as_user,
+            },
+        )
         try:
-            async with client.session(ctx) as session:
-                result = await session.get(
-                    f"/looks/{look_id}/run/{result_format}",
-                    params={"limit": limit},
-                )
-                if isinstance(result, list):
-                    return json.dumps(
-                        {"row_count": len(result), "data": result},
-                        indent=2,
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    result = await session.get(
+                        f"/looks/{look_id}/run/{result_format}",
+                        params={"limit": limit},
                     )
-                return json.dumps(result, indent=2)
+                    if isinstance(result, list):
+                        return json.dumps(
+                            {"row_count": len(result), "data": result},
+                            indent=2,
+                        )
+                    return json.dumps(result, indent=2)
         except Exception as e:
             return format_api_error("run_look", e)
 
@@ -197,23 +315,49 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         fields: Annotated[list[str], "Fields to select"],
         filters: Annotated[dict[str, str] | None, "Filter expressions"] = None,
         sorts: Annotated[list[str] | None, "Sort expressions"] = None,
+        dev_mode: Annotated[
+            bool,
+            "Generate the URL against dev-workspace LookML. Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call. Requires project_id.",
+        ] = None,
+        project_id: Annotated[str | None, "LookML project ID — required with ``branch``"] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("query_url", "query", {"model": model, "view": view})
+        ctx = client.build_context(
+            "query_url",
+            "query",
+            {
+                "model": model,
+                "view": view,
+                "branch": branch,
+                "project_id": project_id,
+                "act_as_user": act_as_user,
+            },
+        )
         try:
-            async with client.session(ctx) as session:
-                body: dict[str, Any] = {
-                    "model": model,
-                    "view": view,
-                    "fields": fields,
-                }
-                if filters:
-                    body["filters"] = filters
-                if sorts:
-                    body["sorts"] = sorts
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    body: dict[str, Any] = {
+                        "model": model,
+                        "view": view,
+                        "fields": fields,
+                    }
+                    if filters:
+                        body["filters"] = filters
+                    if sorts:
+                        body["sorts"] = sorts
 
-                query_def = await session.post("/queries", body=body)
-                share_url = query_def.get("share_url") or query_def.get("url")
-                return json.dumps({"url": share_url, "query_id": query_def.get("id")}, indent=2)
+                    query_def = await session.post("/queries", body=body)
+                    share_url = query_def.get("share_url") or query_def.get("url")
+                    return json.dumps(
+                        {"url": share_url, "query_id": query_def.get("id")},
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("query_url", e)
 
