@@ -288,3 +288,203 @@ class TestPathEncoding:
                 assert " " not in captured["raw_path"]
         finally:
             await client.close()
+
+
+class TestDatagroupAdmin:
+    """``trigger_datagroup`` and ``get_datagroup`` complete the datagroup
+    admin surface. ``trigger_datagroup`` is the missing primitive — sets
+    ``triggered_at`` to force a PDT rebuild AND cache invalidation
+    simultaneously. ``reset_datagroup`` only does cache bust (sets
+    ``stale_before``)."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_datagroup_returns_field_allow_list(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/datagroups/dg1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "dg1",
+                    "model_name": "ecommerce",
+                    "name": "hourly",
+                    "trigger_check_at": 1716000000,
+                    "triggered_at": 1716000000,
+                    "stale_before": 0,
+                    "trigger_value": "abc123",
+                    "trigger_error": None,
+                    "internal_only_field": "hidden",  # NOT in allow-list
+                },
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("get_datagroup", {"datagroup_id": "dg1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["id"] == "dg1"
+                assert payload["model_name"] == "ecommerce"
+                assert "internal_only_field" not in payload
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_trigger_datagroup_patches_triggered_at(self, config):
+        _mock_login_logout()
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"id": "dg1"})
+
+        respx.patch(f"{API_URL}/datagroups/dg1").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("trigger_datagroup", {"datagroup_id": "dg1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["triggered"] is True
+                # Body MUST set triggered_at (not stale_before) — that's
+                # the difference from ``reset_datagroup``.
+                assert "triggered_at" in captured["body"]
+                assert "stale_before" not in captured["body"]
+                assert isinstance(captured["body"]["triggered_at"], int)
+        finally:
+            await looker_client.close()
+
+
+class TestPdtBuildAdmin:
+    """``start_pdt_build`` / ``check_pdt_build`` / ``stop_pdt_build``
+    cover the on-demand PDT regen flow. All three are GET requests per
+    Looker's OpenAPI spec — the ``stop`` endpoint is GET (not DELETE),
+    which is unusual but documented and stable."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_start_pdt_build_passes_force_flags_as_query_strings(self, config):
+        _mock_login_logout()
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(
+                200,
+                json={"materialization_id": "mat-1", "status": "started"},
+            )
+
+        respx.get(f"{API_URL}/derived_table/ecommerce/orders_pdt/start").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "start_pdt_build",
+                    {
+                        "model_name": "ecommerce",
+                        "view_name": "orders_pdt",
+                        "force_rebuild": True,
+                        "force_full_incremental": True,
+                        "workspace": "dev",
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["materialization_id"] == "mat-1"
+        finally:
+            await looker_client.close()
+
+        assert "force_rebuild=true" in captured["url"]
+        assert "force_full_incremental=true" in captured["url"]
+        assert "workspace=dev" in captured["url"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_check_pdt_build_returns_status_and_progress(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/derived_table/mat-1/status").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "materialization_id": "mat-1",
+                    "status": "running",
+                    "ratio": 0.42,
+                    "resp_text": "Building…",
+                    "resource_usage": {"warehouse_credits": 12.5},
+                },
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "check_pdt_build", {"materialization_id": "mat-1"}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["status"] == "running"
+                assert payload["ratio"] == 0.42
+                assert payload["resource_usage"]["warehouse_credits"] == 12.5
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_stop_pdt_build_uses_get_per_looker_spec(self, config):
+        _mock_login_logout()
+        # Per Looker's OpenAPI spec, ``/derived_table/{id}/stop`` is GET
+        # (not DELETE) — this regression-locks that surprising shape.
+        respx.get(f"{API_URL}/derived_table/mat-1/stop").mock(
+            return_value=httpx.Response(
+                200,
+                json={"materialization_id": "mat-1", "status": "stopped"},
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "stop_pdt_build", {"materialization_id": "mat-1"}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["stopped"] is True
+                assert payload["status"] == "stopped"
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_graph_derived_tables_for_view_passes_models_and_workspace(self, config):
+        _mock_login_logout()
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json={"graph_text": "digraph { ... }"})
+
+        respx.get(f"{API_URL}/derived_table/graph/view/orders_pdt").mock(side_effect=capture)
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "graph_derived_tables_for_view",
+                    {"view": "orders_pdt", "models": "ecommerce", "workspace": "dev"},
+                )
+        finally:
+            await looker_client.close()
+
+        assert "models=ecommerce" in captured["url"]
+        assert "workspace=dev" in captured["url"]
