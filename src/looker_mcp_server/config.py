@@ -64,7 +64,7 @@ class DeploymentPostureError(ValueError):
 
 
 # Tool groups that are enabled by default (read-oriented, safe for most deployments).
-DEFAULT_GROUPS = frozenset({"explore", "query", "schema", "content", "health"})
+DEFAULT_GROUPS = frozenset({"explore", "query", "schema", "content", "health", "identity"})
 
 # All available tool groups.
 ALL_GROUPS = frozenset(
@@ -84,6 +84,7 @@ ALL_GROUPS = frozenset(
         "audit",
         "workflows",
         "health",
+        "identity",
     }
 )
 

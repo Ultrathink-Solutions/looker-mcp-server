@@ -161,6 +161,7 @@ def create_server(
     from .tools.folder import register_folder_tools
     from .tools.git import register_git_tools
     from .tools.health import register_health_tools
+    from .tools.identity import register_identity_tools
     from .tools.modeling import register_modeling_tools
     from .tools.query import register_query_tools
     from .tools.schema import register_schema_tools
@@ -183,6 +184,7 @@ def create_server(
         "audit": register_audit_tools,
         "workflows": register_workflow_tools,
         "health": register_health_tools,
+        "identity": register_identity_tools,
     }
 
     registered = []
