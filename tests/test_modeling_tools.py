@@ -522,6 +522,70 @@ class TestPdtBuildAdmin:
         assert "workspace=dev" in captured["url"]
 
 
+class TestBranchArgValidation:
+    """``_validate_branch_args`` is the single source of truth for
+    rejecting invalid branch/project_id combinations. These tests
+    exercise it through ``validate_project`` since that's the simplest
+    consumer surface — but the helper itself is shared across all
+    tools that accept ``branch=…``."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_empty_branch_string_returns_validation_error(self, config):
+        # Empty branch must not reach Looker; it would PUT {"name": ""}
+        # and surface as an opaque 400. Catch upstream with a clear
+        # ValueError that format_api_error renders cleanly.
+        _mock_login_logout()
+        # Mock the endpoints we expect NOT to be called.
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        get_branch = respx.get(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "validate_project",
+                    {"project_id": "proj1", "branch": ""},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert "non-empty" in payload["error"]
+        finally:
+            await looker_client.close()
+
+        assert not patch_session.called
+        assert not get_branch.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_whitespace_only_branch_returns_validation_error(self, config):
+        _mock_login_logout()
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "validate_project",
+                    {"project_id": "proj1", "branch": "   "},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert "whitespace-only" in payload["error"] or "non-empty" in payload["error"]
+        finally:
+            await looker_client.close()
+
+        assert not patch_session.called
+
+
 class TestValidateProjectDevMode:
     """``validate_project`` is the load-bearing primitive for catching
     LookML errors introduced by a PR. Default behavior validates

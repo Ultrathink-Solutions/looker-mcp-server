@@ -53,12 +53,19 @@ ActAsUser = Annotated[str | None, ACT_AS_USER_DESCRIPTION]
 
 
 def _validate_branch_args(branch: str | None, project_id: str | None) -> None:
-    """Branch swap requires the project ID — Looker scopes branches per
-    project, and ``LookerSession.use_branch`` needs the path segment to
-    issue ``GET/PUT /projects/{id}/git_branch``. Raised as ``ValueError``
-    so it surfaces through ``format_api_error`` as a self-describing
-    validation error rather than an opaque API failure.
+    """Branch swap requires a non-empty project ID and branch name.
+
+    Looker scopes branches per project, and ``LookerSession.use_branch``
+    needs the path segment to issue ``GET/PUT /projects/{id}/git_branch``.
+    Empty/whitespace branch strings would otherwise reach Looker as
+    ``{"name": ""}`` and surface as an opaque 400 — much worse signal
+    than a self-describing ``ValueError`` here. Raised as ``ValueError``
+    so ``format_api_error`` formats it cleanly.
     """
+    if branch is not None and not branch.strip():
+        raise ValueError(
+            "branch=… must be a non-empty branch name; got an empty or whitespace-only value."
+        )
     if branch is not None and not project_id:
         raise ValueError(
             "branch=… requires project_id=…; pass the LookML project ID that "
@@ -76,6 +83,14 @@ async def _maybe_use_branch(
     yet another ``async with`` for the no-branch case, but they also need
     the atomic save+restore semantics when a branch IS set. This helper
     keeps the call site flat in both modes.
+
+    This is *dispatch* logic, not validation: it decides whether a swap
+    is requested at all. Validity of the requested swap (non-empty
+    branch, non-empty project_id) is enforced upstream by
+    ``_validate_branch_args``. Adding empty-string guards here would
+    silently skip the swap on invalid input rather than fail loud, which
+    is the wrong failure mode — it would mask upstream bugs that forgot
+    to call the validator.
     """
     if branch is None or project_id is None:
         yield
