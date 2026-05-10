@@ -337,6 +337,18 @@ For parallel PR validation, provision multiple Looker users (e.g. `ci-bot-1`, `c
 - **Multi-project manifest imports.** If your LookML project imports another project, the import stays on whatever branch is currently checked out in the dev workspace for that imported project. The atomic swap is single-project; recursive manifest-aware swapping is a v2 concern.
 - **Cross-call session continuity.** Each tool call gets its own ephemeral API session (login → operation → logout), so `dev_mode=True` only takes effect within a single call. The branch state persists across calls because Looker stores it server-side per-user; the workspace setting does not.
 
+### Coverage by tool group
+
+`dev_mode`, `branch`, and `act_as_user` are propagated through the tool groups that work with workspace-scoped LookML state. Tools that read workspace-agnostic metadata don't accept these args.
+
+| Tool group | Workspace-aware tools | Production-only tools |
+|---|---|---|
+| **git** | `switch_git_branch`, `create_git_branch`, `delete_git_branch`, `reset_to_production` (default `dev_mode=True`) | `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `deploy_to_production` (read prod git state) |
+| **query** | `query`, `query_sql`, `query_url`, `run_look` (default `dev_mode=False`; opt in via `branch=` or `dev_mode=True`) | `run_dashboard`, `search_content` (production content) |
+| **modeling — file ops** | `list_project_files`, `get_file` (default `dev_mode=True`), `create_file`, `update_file`, `delete_file` (always dev — Looker rejects writes to production) | — |
+| **modeling — validation** | `validate_project` (default `dev_mode=False`; opt in via `branch=` for PR validation) | — |
+| **modeling — project metadata** | — | `list_projects`, `get_project`, `get_project_manifest`, `list_datagroups`, `reset_datagroup` (workspace-agnostic project state) |
+
 ## Extending with Custom Identity Providers
 
 The `IdentityProvider` protocol is the primary extension point for integrating with custom authentication systems.

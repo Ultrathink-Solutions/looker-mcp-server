@@ -14,12 +14,7 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
-from ._helpers import _path_seg, _set_if
-
-# Looker's file endpoints are dev-mode-only and require an explicit
-# workspace_id query parameter.  Sessions are ephemeral (per tool call),
-# so PATCH /session workspace state does not persist across calls.
-_DEV_PARAMS: dict[str, str] = {"workspace_id": "dev"}
+from ._helpers import ActAsUser, _maybe_use_branch, _path_seg, _set_if, _validate_branch_args
 
 
 def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
@@ -43,33 +38,55 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("list_projects", e)
 
-    @server.tool(description="List all LookML files in a project (dev workspace).")
+    @server.tool(
+        description=(
+            "List all LookML files in a project. Defaults to the dev workspace's "
+            "currently-checked-out branch — set ``branch=…`` to atomically swap "
+            "the dev workspace to a feature branch for the call (saved branch "
+            "restored on exit), or ``dev_mode=False`` to read production files."
+        ),
+    )
     async def list_project_files(
         project_id: Annotated[str, "LookML project ID"],
+        dev_mode: Annotated[bool, "Read from the dev workspace (default) or production"] = True,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call (saved branch "
+            "restored on exit). Implies dev_mode=True.",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("list_project_files", "modeling", {"project_id": project_id})
+        ctx = client.build_context(
+            "list_project_files",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
         try:
-            async with client.session(ctx) as session:
-                files = await session.get(
-                    f"/projects/{_path_seg(project_id)}/files", params=_DEV_PARAMS
-                )
-                result = [
-                    {
-                        "id": f.get("id"),
-                        "title": f.get("title"),
-                        "type": f.get("type"),
-                        "extension": f.get("extension"),
-                        "editable": f.get("editable"),
-                    }
-                    for f in (files or [])
-                ]
-                return json.dumps(result, indent=2)
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    files = await session.get(f"/projects/{_path_seg(project_id)}/files")
+                    result = [
+                        {
+                            "id": f.get("id"),
+                            "title": f.get("title"),
+                            "type": f.get("type"),
+                            "extension": f.get("extension"),
+                            "editable": f.get("editable"),
+                        }
+                        for f in (files or [])
+                    ]
+                    return json.dumps(result, indent=2)
         except Exception as e:
             return format_api_error("list_project_files", e)
 
     @server.tool(
         description=(
-            "Read the contents of a LookML file (dev workspace). Returns the full source code."
+            "Read the contents of a LookML file. Defaults to the dev workspace's "
+            "currently-checked-out branch — set ``branch=…`` to atomically swap "
+            "to a feature branch for the call, or ``dev_mode=False`` to read the "
+            "production version."
         ),
     )
     async def get_file(
@@ -77,79 +94,133 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
         file_id: Annotated[
             str, "File path within the project (e.g. 'models/ecommerce.model.lkml')"
         ],
+        dev_mode: Annotated[bool, "Read from dev workspace (default) or production"] = True,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call. Implies dev_mode=True.",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("get_file", "modeling", {"project_id": project_id})
+        ctx = client.build_context(
+            "get_file",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
         try:
-            async with client.session(ctx) as session:
-                file_info = await session.get(
-                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
-                    params=_DEV_PARAMS,
-                )
-                return json.dumps(file_info, indent=2)
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    file_info = await session.get(
+                        f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
+                    )
+                    return json.dumps(file_info, indent=2)
         except Exception as e:
             return format_api_error("get_file", e)
 
     @server.tool(
-        description="Create a new LookML file in a project (dev workspace).",
+        description=(
+            "Create a new LookML file in a project. Always operates on the dev "
+            "workspace — Looker rejects writes to production LookML. Pair with "
+            "``branch=…`` to scope the create to a specific feature branch."
+        ),
     )
     async def create_file(
         project_id: Annotated[str, "LookML project ID"],
         file_id: Annotated[str, "File path (e.g. 'views/new_view.view.lkml')"],
         content: Annotated[str, "LookML source code for the file"],
+        branch: Annotated[
+            str | None,
+            "Atomically swap to this branch for the call (saved branch restored on exit).",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("create_file", "modeling", {"project_id": project_id})
+        ctx = client.build_context(
+            "create_file",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
         try:
-            async with client.session(ctx) as session:
-                file_info = await session.post(
-                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
-                    body={"id": file_id, "content": content},
-                    params=_DEV_PARAMS,
-                )
-                return json.dumps(
-                    {"created": True, "id": file_info.get("id") if file_info else file_id},
-                    indent=2,
-                )
+            _validate_branch_args(branch, project_id)
+            async with client.session(ctx, dev_mode=True) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    file_info = await session.post(
+                        f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
+                        body={"id": file_id, "content": content},
+                    )
+                    return json.dumps(
+                        {"created": True, "id": file_info.get("id") if file_info else file_id},
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("create_file", e)
 
     @server.tool(
-        description="Update the content of an existing LookML file (dev workspace).",
+        description=(
+            "Update the content of an existing LookML file. Always operates on "
+            "the dev workspace — production is read-only. Pair with ``branch=…`` "
+            "to scope the edit to a specific feature branch."
+        ),
     )
     async def update_file(
         project_id: Annotated[str, "LookML project ID"],
         file_id: Annotated[str, "File path within the project"],
         content: Annotated[str, "New LookML source code"],
+        branch: Annotated[
+            str | None,
+            "Atomically swap to this branch for the call (saved branch restored on exit).",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("update_file", "modeling", {"project_id": project_id})
+        ctx = client.build_context(
+            "update_file",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
         try:
-            async with client.session(ctx) as session:
-                file_info = await session.patch(
-                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
-                    body={"content": content},
-                    params=_DEV_PARAMS,
-                )
-                return json.dumps(
-                    {"updated": True, "id": file_info.get("id") if file_info else file_id},
-                    indent=2,
-                )
+            _validate_branch_args(branch, project_id)
+            async with client.session(ctx, dev_mode=True) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    file_info = await session.patch(
+                        f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
+                        body={"content": content},
+                    )
+                    return json.dumps(
+                        {"updated": True, "id": file_info.get("id") if file_info else file_id},
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("update_file", e)
 
     @server.tool(
-        description="Delete a LookML file from a project (dev workspace).",
+        description=(
+            "Delete a LookML file from a project. Always operates on the dev "
+            "workspace — production is read-only. Pair with ``branch=…`` to "
+            "scope the deletion to a specific feature branch."
+        ),
     )
     async def delete_file(
         project_id: Annotated[str, "LookML project ID"],
         file_id: Annotated[str, "File path to delete"],
+        branch: Annotated[
+            str | None,
+            "Atomically swap to this branch for the call (saved branch restored on exit).",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("delete_file", "modeling", {"project_id": project_id})
+        ctx = client.build_context(
+            "delete_file",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
         try:
-            async with client.session(ctx) as session:
-                await session.delete(
-                    f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
-                    params=_DEV_PARAMS,
-                )
-                return json.dumps({"deleted": True, "file_id": file_id}, indent=2)
+            _validate_branch_args(branch, project_id)
+            async with client.session(ctx, dev_mode=True) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    await session.delete(
+                        f"/projects/{_path_seg(project_id)}/files/{_path_seg(file_id)}",
+                    )
+                    return json.dumps({"deleted": True, "file_id": file_id}, indent=2)
         except Exception as e:
             return format_api_error("delete_file", e)
 
@@ -378,45 +449,68 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Validate LookML syntax and semantics for a project. "
-            "Returns any errors or warnings found."
+            "Validate LookML syntax and semantics for a project. By default "
+            "validates production LookML. Pass ``branch=…`` (or ``dev_mode=True``) "
+            "to validate the dev workspace's LookML — required for any CI flow "
+            "checking that a PR doesn't introduce LookML errors. Returns "
+            "errors[], warnings[], and ``valid`` (boolean) summary."
         ),
     )
     async def validate_project(
         project_id: Annotated[str, "LookML project ID to validate"],
+        dev_mode: Annotated[
+            bool,
+            "Validate the dev workspace's LookML rather than production. "
+            "Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Atomically swap to this branch for the call (saved branch restored "
+            "on exit). Implies dev_mode=True.",
+        ] = None,
+        act_as_user: ActAsUser = None,
     ) -> str:
-        ctx = client.build_context("validate_project", "modeling", {"project_id": project_id})
+        ctx = client.build_context(
+            "validate_project",
+            "modeling",
+            {"project_id": project_id, "branch": branch, "act_as_user": act_as_user},
+        )
         try:
-            async with client.session(ctx) as session:
-                result = await session.post(f"/projects/{_path_seg(project_id)}/lookml_validation")
-                errors = result.get("errors") or [] if result else []
-                warnings = result.get("warnings") or [] if result else []
-                return json.dumps(
-                    {
-                        "valid": len(errors) == 0,
-                        "error_count": len(errors),
-                        "warning_count": len(warnings),
-                        "errors": [
-                            {
-                                "severity": e.get("severity"),
-                                "kind": e.get("kind"),
-                                "message": e.get("message"),
-                                "source_file": e.get("source_file"),
-                                "line": e.get("line"),
-                            }
-                            for e in errors
-                        ],
-                        "warnings": [
-                            {
-                                "severity": w.get("severity"),
-                                "message": w.get("message"),
-                                "source_file": w.get("source_file"),
-                            }
-                            for w in warnings
-                        ],
-                    },
-                    indent=2,
-                )
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    result = await session.post(
+                        f"/projects/{_path_seg(project_id)}/lookml_validation"
+                    )
+                    errors = result.get("errors") or [] if result else []
+                    warnings = result.get("warnings") or [] if result else []
+                    return json.dumps(
+                        {
+                            "valid": len(errors) == 0,
+                            "error_count": len(errors),
+                            "warning_count": len(warnings),
+                            "errors": [
+                                {
+                                    "severity": e.get("severity"),
+                                    "kind": e.get("kind"),
+                                    "message": e.get("message"),
+                                    "source_file": e.get("source_file"),
+                                    "line": e.get("line"),
+                                }
+                                for e in errors
+                            ],
+                            "warnings": [
+                                {
+                                    "severity": w.get("severity"),
+                                    "message": w.get("message"),
+                                    "source_file": w.get("source_file"),
+                                }
+                                for w in warnings
+                            ],
+                        },
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("validate_project", e)
 

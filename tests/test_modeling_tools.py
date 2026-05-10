@@ -520,3 +520,189 @@ class TestPdtBuildAdmin:
 
         assert "models=ecommerce" in captured["url"]
         assert "workspace=dev" in captured["url"]
+
+
+class TestValidateProjectDevMode:
+    """``validate_project`` is the load-bearing primitive for catching
+    LookML errors introduced by a PR. Default behavior validates
+    production (backwards-compatible); ``branch=…`` flips the dev
+    workspace to the feature branch atomically with save+restore."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_default_validates_production(self, config):
+        _mock_login_logout()
+        # No PATCH /session expected with dev_mode default False.
+        patch_route = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "production"})
+        )
+        respx.post(f"{API_URL}/projects/proj1/lookml_validation").mock(
+            return_value=httpx.Response(200, json={"errors": [], "warnings": []})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("validate_project", {"project_id": "proj1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["valid"] is True
+        finally:
+            await looker_client.close()
+
+        # Default behavior: no workspace switch.
+        assert not patch_route.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_branch_drives_save_swap_validate_restore(self, config):
+        _mock_login_logout()
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        get_branch = respx.get(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+        put_branch = respx.put(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+        # Validation surfaces a real LookML error — exercises the failure
+        # case from the field report (broken assert in tests.lkml).
+        respx.post(f"{API_URL}/projects/proj1/lookml_validation").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "errors": [
+                        {
+                            "severity": "error",
+                            "kind": "value_error",
+                            "message": "wrong argument type NilClass (expected Integer)",
+                            "source_file": "models/tests.lkml",
+                            "line": 42,
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "validate_project",
+                    {"project_id": "proj1", "branch": "feature-x"},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload["valid"] is False
+                assert payload["error_count"] == 1
+                assert "NilClass" in payload["errors"][0]["message"]
+        finally:
+            await looker_client.close()
+
+        # The full sequence happened in order: PATCH /session, GET branch,
+        # PUT swap, POST validate, PUT restore.
+        assert patch_session.called
+        assert get_branch.called
+        assert put_branch.call_count == 2
+        bodies = [json.loads(c.request.content.decode()) for c in put_branch.calls]
+        assert bodies == [{"name": "feature-x"}, {"name": "main"}]
+
+
+class TestFileOpsDevMode:
+    """File-ops tools migrated from the per-call ``?workspace_id=dev``
+    query-param trick to the session-level PATCH /session pattern. The
+    default behavior matches the previous behavior (dev workspace), but
+    callers can now opt for production reads or atomic branch swaps."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_list_project_files_defaults_to_dev_workspace(self, config):
+        _mock_login_logout()
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        respx.get(f"{API_URL}/projects/proj1/files").mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"id": "models/x.lkml", "title": "x", "type": "model"}],
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("list_project_files", {"project_id": "proj1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                assert payload[0]["id"] == "models/x.lkml"
+        finally:
+            await looker_client.close()
+
+        # Default dev_mode=True triggers PATCH /session — replaces the
+        # legacy ``?workspace_id=dev`` query-param trick.
+        assert patch_session.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_list_project_files_with_dev_mode_false_reads_production(self, config):
+        _mock_login_logout()
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        respx.get(f"{API_URL}/projects/proj1/files").mock(return_value=httpx.Response(200, json=[]))
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "list_project_files",
+                    {"project_id": "proj1", "dev_mode": False},
+                )
+        finally:
+            await looker_client.close()
+
+        # No workspace switch when caller explicitly opts out.
+        assert not patch_session.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_update_file_with_branch_does_atomic_save_swap_restore(self, config):
+        _mock_login_logout()
+        respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        get_branch = respx.get(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "main"})
+        )
+        put_branch = respx.put(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x"})
+        )
+        respx.patch(f"{API_URL}/projects/proj1/files/models%2Fx.lkml").mock(
+            return_value=httpx.Response(200, json={"id": "models/x.lkml"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "update_file",
+                    {
+                        "project_id": "proj1",
+                        "file_id": "models/x.lkml",
+                        "content": "view: x { dimension: id {} }",
+                        "branch": "feature-x",
+                    },
+                )
+        finally:
+            await looker_client.close()
+
+        # branch=feature-x triggers the full save→swap→edit→restore cycle.
+        assert get_branch.called
+        assert put_branch.call_count == 2
+        bodies = [json.loads(c.request.content.decode()) for c in put_branch.calls]
+        assert bodies == [{"name": "feature-x"}, {"name": "main"}]
