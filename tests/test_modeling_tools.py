@@ -466,6 +466,38 @@ class TestPdtBuildAdmin:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_stop_pdt_build_does_not_falsely_report_success_on_noop(self, config):
+        # Edge case: caller stops an already-finished materialization.
+        # Looker returns the existing status (``complete``) — we must
+        # NOT hard-code ``stopped: True``, because that would misreport
+        # the cancellation as successful when the build had already
+        # naturally completed.
+        _mock_login_logout()
+        respx.get(f"{API_URL}/derived_table/mat-2/stop").mock(
+            return_value=httpx.Response(
+                200,
+                json={"materialization_id": "mat-2", "status": "complete"},
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"modeling"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "stop_pdt_build", {"materialization_id": "mat-2"}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+                # Status reflects what Looker actually returned, and
+                # ``stopped`` is derived from it — not hard-coded.
+                assert payload["status"] == "complete"
+                assert payload["stopped"] is False
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_graph_derived_tables_for_view_passes_models_and_workspace(self, config):
         _mock_login_logout()
         captured: dict = {}

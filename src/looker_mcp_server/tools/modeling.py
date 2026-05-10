@@ -668,11 +668,16 @@ def register_modeling_tools(server: FastMCP, client: LookerClient) -> None:
                     f"/derived_table/{_path_seg(materialization_id)}/stop",
                     params=params or None,
                 )
+                status = (result or {}).get("status")
                 return json.dumps(
                     {
                         "materialization_id": (result or {}).get("materialization_id"),
-                        "stopped": True,
-                        "status": (result or {}).get("status"),
+                        # Derive ``stopped`` from the actual response state.
+                        # A no-op stop (e.g., the materialization already
+                        # finished) returns a non-stopped status, and we
+                        # must not falsely report cancellation success.
+                        "stopped": status == "stopped",
+                        "status": status,
                         "resp_text": (result or {}).get("resp_text"),
                     },
                     indent=2,

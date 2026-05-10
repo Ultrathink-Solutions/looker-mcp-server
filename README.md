@@ -346,7 +346,7 @@ If you currently rely on `LOOKER_MCP_AUTH_TOKEN` for gateway-level MCP protectio
 
 ## PDT Administration Workflows
 
-The modeling tool group exposes the primitives Looker uses for PDT (Persistent Derived Table) lifecycle: `update_connection` (toggle PDT control on a connection), `start_pdt_build` / `check_pdt_build` / `stop_pdt_build` (build management), `trigger_datagroup` (force rebuild + cache invalidation), and `graph_derived_tables_for_*` (dependency inspection).
+PDT (Persistent Derived Table) lifecycle is split across two tool groups: the `connection` group's `update_connection` toggles PDT control on a connection and the `modeling` group's `start_pdt_build` / `check_pdt_build` / `stop_pdt_build` (build management), `trigger_datagroup` (force rebuild + cache invalidation), and `graph_derived_tables_for_*` (dependency inspection) cover the per-PDT operations.
 
 Two opinionated recipes for connection-level workflows:
 
