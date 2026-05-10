@@ -25,10 +25,22 @@ logger = structlog.get_logger()
 class LookerApiError(Exception):
     """Raised when a Looker API call fails."""
 
-    def __init__(self, status_code: int, message: str, detail: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        detail: str = "",
+        body: dict[str, Any] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.message = message
         self.detail = detail
+        # Full decoded JSON error body when Looker returns a structured
+        # response. Carries fields like ``sql`` (compiled SQL on query
+        # failures), ``errors[]`` (LookML compile/evaluator diagnostics),
+        # and ``applied_filters`` — the highest-signal debugging payload.
+        # Left ``None`` for plain-text or unparseable bodies.
+        self.body = body
         super().__init__(f"Looker API {status_code}: {message}")
 
 
@@ -112,16 +124,38 @@ class LookerSession:
         text/plain ones). Try JSON first; fall back to a 500-char text
         truncation. Shared by both the JSON and text request paths so
         their error parsing can never drift.
+
+        When the body parses as a JSON object, it is captured verbatim on
+        the raised ``LookerApiError`` so callers can surface high-signal
+        fields like ``sql``, ``errors[]``, and ``applied_filters`` —
+        critical for debugging query and LookML failures.
         """
         if response.status_code < 400:
             return
         detail = ""
+        body: dict[str, Any] | None = None
         try:
-            body = response.json()
-            detail = body.get("message", "") or body.get("error", "")
+            parsed = response.json()
         except Exception:
             detail = response.text[:500]
-        raise LookerApiError(response.status_code, response.reason_phrase, detail)
+        else:
+            if isinstance(parsed, dict):
+                body = parsed
+                # ``detail`` is part of the public ``LookerApiError`` /
+                # ``format_api_error`` shape and consumers expect a string.
+                # Looker normally returns ``message``/``error`` as strings,
+                # but a non-conforming payload (nested object/array under
+                # those keys) would otherwise leak a non-string and break
+                # downstream string ops. Coerce defensively; the full
+                # structured payload is still available via ``body``.
+                hint = parsed.get("message") or parsed.get("error") or ""
+                detail = hint if isinstance(hint, str) else json.dumps(hint)[:500]
+            else:
+                # Looker occasionally returns JSON arrays / scalars on error.
+                # Stringify to keep ``detail`` populated; don't carry through
+                # ``body`` since the contract is "dict or nothing".
+                detail = json.dumps(parsed)[:500]
+        raise LookerApiError(response.status_code, response.reason_phrase, detail, body=body)
 
     async def _request(
         self,
@@ -366,9 +400,15 @@ def format_api_error(tool_name: str, error: Exception) -> str:
                 hint = "Looker server error — the service may be temporarily unavailable."
             case _:
                 hint = error.message
-        result = {"error": hint, "status": status}
+        result: dict[str, Any] = {"error": hint, "status": status}
         if error.detail:
             result["detail"] = error.detail
+        # Surface the full Looker error body (sql, errors[], applied_filters,
+        # fields.measures[].sql, …) so debuggers don't have to re-fetch via
+        # raw REST. ``_raise_for_status`` only populates ``body`` when the
+        # response decoded as a JSON object.
+        if error.body is not None:
+            result["body"] = error.body
     elif isinstance(error, ValueError):
         # Validation errors raised by tools or identity providers
         # (e.g. ``act_as_user`` rejecting a malformed value or an

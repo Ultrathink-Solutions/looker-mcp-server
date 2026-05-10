@@ -64,6 +64,82 @@ class TestLookerSession:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_error_carries_full_json_body(self):
+        api_url = "https://test.looker.com/api/4.0"
+        # Looker returns the compiled SQL and LookML evaluator errors in
+        # the 400 body for query failures. Callers need access to these.
+        full_body = {
+            "message": "Query failed with unexpected exception …",
+            "sql": "SELECT 1 FROM dual",
+            "errors": [{"message": "type mismatch"}],
+            "applied_filters": {"orders.created_date": "today"},
+        }
+        respx.get(f"{api_url}/queries/1/run/json").mock(
+            return_value=httpx.Response(400, json=full_body)
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            with pytest.raises(LookerApiError) as exc_info:
+                await session.get("/queries/1/run/json")
+            assert exc_info.value.status_code == 400
+            assert exc_info.value.detail == full_body["message"]
+            assert exc_info.value.body == full_body
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_error_with_plain_text_body_leaves_body_none(self):
+        api_url = "https://test.looker.com/api/4.0"
+        respx.get(f"{api_url}/projects/p/git/deploy_key").mock(
+            return_value=httpx.Response(404, text="No deploy key configured")
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            with pytest.raises(LookerApiError) as exc_info:
+                await session.get_text("/projects/p/git/deploy_key")
+            assert exc_info.value.status_code == 404
+            assert "No deploy key configured" in exc_info.value.detail
+            assert exc_info.value.body is None
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_error_with_array_body_leaves_body_none(self):
+        # Some Looker endpoints occasionally return JSON arrays on error.
+        # The contract is "body is a dict or it's None" — array responses
+        # populate detail (truncated repr) but not body.
+        api_url = "https://test.looker.com/api/4.0"
+        respx.get(f"{api_url}/something").mock(
+            return_value=httpx.Response(400, json=["error1", "error2"])
+        )
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            with pytest.raises(LookerApiError) as exc_info:
+                await session.get("/something")
+            assert exc_info.value.body is None
+            assert "error1" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_error_with_non_string_message_coerces_detail_to_string(self):
+        # If Looker ever returns a non-string ``message`` (e.g. a nested
+        # error object), ``detail`` must remain a string for downstream
+        # consumers. The full payload is still preserved on ``body``.
+        api_url = "https://test.looker.com/api/4.0"
+        full_body = {
+            "message": {"code": "X1", "text": "structured error"},
+            "errors": [{"message": "downstream"}],
+        }
+        respx.get(f"{api_url}/something").mock(return_value=httpx.Response(400, json=full_body))
+        async with httpx.AsyncClient(base_url=api_url) as http:
+            session = LookerSession(http, "test-token")
+            with pytest.raises(LookerApiError) as exc_info:
+                await session.get("/something")
+            assert isinstance(exc_info.value.detail, str)
+            assert "structured error" in exc_info.value.detail
+            # Full structured payload still accessible via body.
+            assert exc_info.value.body == full_body
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_delete_returns_none(self):
         api_url = "https://test.looker.com/api/4.0"
         respx.delete(f"{api_url}/resource/1").mock(return_value=httpx.Response(204))
@@ -256,6 +332,31 @@ class TestFormatApiError:
         err = RuntimeError("something broke")
         result = json.loads(format_api_error("test_tool", err))
         assert "something broke" in result["error"]
+
+    def test_format_includes_full_body_when_present(self):
+        # Mimics a Looker query failure: detail message is generic but the
+        # body carries the compiled SQL, the LookML evaluator errors[], and
+        # applied_filters — the high-signal debugging payload that callers
+        # otherwise have to re-fetch via raw REST.
+        body = {
+            "message": "Query failed with unexpected exception …",
+            "sql": "SELECT region, SUM(total) FROM orders GROUP BY 1",
+            "errors": [
+                {"message": "wrong argument type NilClass (expected Integer)"},
+            ],
+            "applied_filters": {"orders.created_date": "90 days"},
+        }
+        err = LookerApiError(400, "Bad Request", "Query failed …", body=body)
+        result = json.loads(format_api_error("query", err))
+        assert result["status"] == 400
+        assert result["body"] == body
+        assert result["body"]["sql"].startswith("SELECT region")
+        assert result["body"]["errors"][0]["message"].startswith("wrong argument type")
+
+    def test_format_omits_body_when_absent(self):
+        err = LookerApiError(401, "Unauthorized", "Bad creds")
+        result = json.loads(format_api_error("test_tool", err))
+        assert "body" not in result
 
 
 class TestCheckConnectivity:
