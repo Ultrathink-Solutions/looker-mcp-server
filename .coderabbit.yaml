@@ -27,9 +27,15 @@ reviews:
       - "DRAFT"
       - "DO NOT MERGE"
     ignore_usernames:
+      # Include both bare names (for OAuth-based bots) and GitHub-App
+      # logins (suffixed with "[bot]"); CodeRabbit's ignore_usernames
+      # uses exact-match.
       - "dependabot"
+      - "dependabot[bot]"
       - "renovate"
+      - "renovate[bot]"
       - "coderabbitai"
+      - "coderabbitai[bot]"
 
   path_filters:
     - "!**/*.lock"
