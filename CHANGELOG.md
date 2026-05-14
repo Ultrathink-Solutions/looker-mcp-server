@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-14
+
+Small follow-up release adding **`run_query`**, the missing peer to
+`run_look`: it wraps `GET /queries/{query_id}/run/{result_format}` so
+callers can re-run an existing saved `Query` by ID without re-specifying
+its body. The previously-available `query` tool always re-specifies the
+query from `model/view/fields/filters/sorts`, which silently drops
+anything not in that body — `dynamic_fields`, table calcs, vis config,
+and other settings baked into the saved `Query` object. The motivating
+use case is **tile-fidelity validation**: a dashboard tile's
+`query.id` points to a saved `Query` that may carry tile-local table
+calcs in its `dynamic_fields`, and faithfully reproducing the tile's
+data requires running *that* `Query`, not re-specifying a new one.
+`run_query` also exposes the Looker run-time knobs that matter for
+that workflow — `apply_formatting` (render values per LookML/Look
+formatting), `apply_vis` (apply vis-config rendering),
+`server_table_calcs` (compute table calcs server-side), `cache`, and
+a `limit` override. `run_dashboard`'s per-element call now routes
+through the same shared helper that backs `run_query`, so the two
+paths can't drift on path shape, query-string serialization, or the
+JSON-vs-`text/plain` response routing.
+
+### Added
+
+- **`run_query(query_id, ...)` tool** in the `query` group. Wraps
+  `GET /api/4.0/queries/{query_id}/run/{result_format}`. Accepts
+  `result_format` (`json`/`json_detail`/`csv`/`txt`), `limit`,
+  `apply_formatting`, `apply_vis`, `server_table_calcs`, `cache`,
+  plus the standard `dev_mode` + `branch` + `project_id` +
+  `act_as_user` parameter set for parity with `run_look`. `csv` and
+  `txt` formats route through `session.get_text` (the same
+  `text/plain` trap that motivated v0.16.0's `query_sql` fix) and
+  are wrapped in a `{"format": ..., "data": ...}` JSON envelope so
+  the MCP response shape stays JSON.
+- **Shared `_execute_saved_query` helper** at module level in
+  `tools/query.py`. Both `run_query` and `run_dashboard`'s per-tile
+  loop call it, so the saved-query execution path (URL shape, param
+  serialization, response routing) has a single source of truth.
+  Booleans are serialized as lowercase `true`/`false` — httpx's
+  default `str(True)` → `"True"` is not what Looker's query-string
+  parser accepts; pinned by tests.
+
+### Changed
+
+- `run_dashboard` no longer inlines its per-element
+  `session.get(f"/queries/{id}/run/json")` call; it now routes
+  through `_execute_saved_query` for consistency with `run_query`.
+  Behavior is unchanged — same endpoint, same response shape — but
+  the wire-level contract is now regression-guarded by a test.
+
 ## [0.16.0] - 2026-05-10
 
 This release closes the **dev-mode gap** across every workspace-scoped
@@ -709,6 +759,7 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
+[0.17.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.13.0...v0.14.0
