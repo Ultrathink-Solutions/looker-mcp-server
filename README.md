@@ -100,7 +100,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | Group | Tools | Description |
 |-------|-------|-------------|
 | **explore**\* | `list_models`, `get_model`, `get_explore`, `list_dimensions`, `list_measures`, `list_connections` | Browse LookML models, explores, and fields |
-| **query**\* | `query`, `query_sql`, `run_look`, `run_dashboard`, `query_url`, `search_content` | Run queries through the semantic layer |
+| **query**\* | `query`, `query_sql`, `run_query`, `run_look`, `run_dashboard`, `query_url`, `search_content` | Run queries through the semantic layer |
 | **schema**\* | `list_databases`, `list_schemas`, `list_tables`, `list_columns` | Inspect underlying database schema |
 | **content**\* | `list_looks`, `create_look`, `update_look`, `delete_look`, `list_dashboards`, `create_dashboard`, `update_dashboard`, `delete_dashboard`, `add_dashboard_element`, `add_dashboard_filter`, `generate_embed_url`, `validate_content` | Manage Looks and dashboards |
 | **board** | `list_boards`, `get_board`, `create_board`, `update_board`, `delete_board`, `get_board_section`, `create_board_section`, `update_board_section`, `delete_board_section`, `get_board_item`, `create_board_item`, `update_board_item`, `delete_board_item` | Curate content with boards, sections, and items |
@@ -235,7 +235,7 @@ The git tools accept an optional `act_as_user` argument so an admin can perform 
 
 **Security model.** The MCP forwards capability — it does not gate it. Sudo permission is enforced by Looker server-side: if the configured `LOOKER_CLIENT_ID` does not have sudo capability, `login_user` returns HTTP 403 and the tool fails. There is no MCP-side "who may impersonate whom" policy in the open-source server; layer one in via a wrapping `IdentityProvider` if you need it (see the next section).
 
-**Tool coverage.** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. The four query tools accept it too — `query`, `query_sql`, `query_url`, `run_look` — for the CI pattern where queries against a feature branch must run under a dedicated service user's dev workspace rather than the calling admin's. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
+**Tool coverage.** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. The five query tools accept it too — `query`, `query_sql`, `query_url`, `run_query`, `run_look` — for the CI pattern where queries against a feature branch must run under a dedicated service user's dev workspace rather than the calling admin's. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
 
 **Audit log.** Every argument-driven sudo emits an INFO-level structlog line:
 
@@ -263,7 +263,7 @@ This is independent of the trace-level `looker.session.sudo` debug line and is t
 
 ## Dev Mode and Branch Validation
 
-The query tools (`query`, `query_sql`, `query_url`, `run_look`) and the modeling/git tools accept three optional arguments — `dev_mode`, `branch`, and `project_id` — that together let you run operations against the LookML in a Looker dev workspace rather than production. This is what makes feature-branch validation possible from the MCP without falling back to raw REST.
+The query tools (`query`, `query_sql`, `query_url`, `run_query`, `run_look`) and the modeling/git tools accept three optional arguments — `dev_mode`, `branch`, and `project_id` — that together let you run operations against the LookML in a Looker dev workspace rather than production. This is what makes feature-branch validation possible from the MCP without falling back to raw REST.
 
 **How Looker scopes workspaces.** Workspace selection (production vs. dev) is a property of the API session token, not the call. The MCP issues `PATCH /session {"workspace_id": "dev"}` immediately after authentication when `dev_mode=True` is set; this affects every subsequent call routed through the same session. The setting does not persist across logins, so each MCP call sets it explicitly.
 
@@ -344,7 +344,7 @@ For parallel PR validation, provision multiple Looker users (e.g. `ci-bot-1`, `c
 | Tool group | Workspace-aware tools | Production-only tools |
 |---|---|---|
 | **git** | `switch_git_branch`, `create_git_branch`, `delete_git_branch`, `reset_to_production` (default `dev_mode=True`) | `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `deploy_to_production` (read prod git state) |
-| **query** | `query`, `query_sql`, `query_url`, `run_look` (default `dev_mode=False`; opt in via `branch=` or `dev_mode=True`) | `run_dashboard`, `search_content` (production content) |
+| **query** | `query`, `query_sql`, `query_url`, `run_query`, `run_look` (default `dev_mode=False`; opt in via `branch=` or `dev_mode=True`) | `run_dashboard`, `search_content` (production content) |
 | **modeling — file ops** | `list_project_files`, `get_file` (default `dev_mode=True`), `create_file`, `update_file`, `delete_file` (always dev — Looker rejects writes to production) | — |
 | **modeling — validation** | `validate_project` (default `dev_mode=False`; opt in via `branch=` for PR validation) | — |
 | **modeling — data tests** | `list_lookml_tests`, `run_lookml_tests` (default `dev_mode=False`; opt in via `branch=` for PR data-regression checks) | — |
