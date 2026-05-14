@@ -11,8 +11,55 @@ from typing import Annotated, Any
 
 from fastmcp import FastMCP
 
-from ..client import LookerClient, format_api_error
+from ..client import LookerClient, LookerSession, format_api_error
 from ._helpers import ActAsUser, _maybe_use_branch, _validate_branch_args
+
+# Looker returns these formats as ``text/plain`` rather than JSON; calling
+# ``session.get`` on them would raise ``Expecting value`` from the JSON
+# decoder. ``sql`` is the same trap that motivated #29 / ``get_text`` —
+# kept here so any future format additions stay co-located.
+_TEXT_PLAIN_FORMATS = frozenset({"csv", "txt", "sql"})
+
+
+async def _execute_saved_query(
+    session: LookerSession,
+    query_id: str,
+    result_format: str = "json",
+    *,
+    limit: int | None = None,
+    apply_formatting: bool | None = None,
+    apply_vis: bool | None = None,
+    server_table_calcs: bool | None = None,
+    cache: bool | None = None,
+) -> Any:
+    """Run an existing Looker ``Query`` via ``GET /queries/{id}/run/{format}``.
+
+    Shared by ``run_query`` and ``run_dashboard``'s per-element loop so the
+    two paths can't drift on path shape, param serialization, or the
+    JSON-vs-text response routing.
+
+    Booleans are serialized as lowercase ``true``/``false`` because httpx's
+    default ``str(True)`` → ``"True"`` is not what Looker's query-string
+    parser accepts. ``None`` values are omitted entirely so the caller sees
+    Looker's documented defaults.
+    """
+    params: dict[str, Any] = {}
+    if limit is not None:
+        params["limit"] = str(limit)
+    for key, value in (
+        ("apply_formatting", apply_formatting),
+        ("apply_vis", apply_vis),
+        ("server_table_calcs", server_table_calcs),
+        ("cache", cache),
+    ):
+        if value is not None:
+            params[key] = "true" if value else "false"
+
+    path = f"/queries/{query_id}/run/{result_format}"
+    request_params = params or None
+    if result_format in _TEXT_PLAIN_FORMATS:
+        return await session.get_text(path, params=request_params)
+    return await session.get(path, params=request_params)
 
 
 def register_query_tools(server: FastMCP, client: LookerClient) -> None:
@@ -224,6 +271,106 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
+            "Run an existing saved Looker ``Query`` by ID and return its "
+            "results. Unlike ``query``, this does not re-spec the query "
+            "body — any settings baked into the saved ``Query`` (e.g. "
+            "``dynamic_fields`` / table calcs / vis config) are preserved. "
+            "Useful for re-running a query whose ID you already have: a "
+            "dashboard tile's ``query.id``, the id returned by "
+            "``query_url``, or an id surfaced by other Looker tooling."
+        ),
+    )
+    async def run_query(
+        query_id: Annotated[str, "ID of the saved Query"],
+        result_format: Annotated[
+            str,
+            "Output format: 'json' (default), 'json_detail', 'csv', 'txt'",
+        ] = "json",
+        limit: Annotated[
+            int | None,
+            "Row limit override. Omit to use the limit baked into the saved Query.",
+        ] = None,
+        apply_formatting: Annotated[
+            bool,
+            "Render values per LookML/Look formatting (currency symbols, "
+            "date formats, etc.). Default false matches Looker's API default.",
+        ] = False,
+        apply_vis: Annotated[
+            bool,
+            "Apply visualization-config-driven rendering to the result. "
+            "Default false matches Looker's API default.",
+        ] = False,
+        server_table_calcs: Annotated[
+            bool,
+            "Compute table calculations server-side so the response "
+            "includes them. Required for tile-fidelity validation when "
+            "the saved Query carries table calcs. Default false matches "
+            "Looker's API default.",
+        ] = False,
+        cache: Annotated[
+            bool,
+            "Allow Looker to serve cached results. Set false to force a "
+            "fresh run. Default true matches Looker's API default.",
+        ] = True,
+        dev_mode: Annotated[
+            bool,
+            "Resolve the Query against the dev workspace's LookML rather "
+            "than production. Implied when ``branch`` is set.",
+        ] = False,
+        branch: Annotated[
+            str | None,
+            "Project branch to atomically swap to for this call (saved "
+            "branch restored on exit). Requires project_id.",
+        ] = None,
+        project_id: Annotated[
+            str | None,
+            "LookML project ID owning the Query's model — required with ``branch``",
+        ] = None,
+        act_as_user: ActAsUser = None,
+    ) -> str:
+        ctx = client.build_context(
+            "run_query",
+            "query",
+            {
+                "query_id": query_id,
+                "branch": branch,
+                "project_id": project_id,
+                "act_as_user": act_as_user,
+            },
+        )
+        try:
+            _validate_branch_args(branch, project_id)
+            effective_dev_mode = dev_mode or branch is not None
+            async with client.session(ctx, dev_mode=effective_dev_mode) as session:
+                async with _maybe_use_branch(session, project_id, branch):
+                    result = await _execute_saved_query(
+                        session,
+                        query_id,
+                        result_format,
+                        limit=limit,
+                        apply_formatting=apply_formatting,
+                        apply_vis=apply_vis,
+                        server_table_calcs=server_table_calcs,
+                        cache=cache,
+                    )
+                    if isinstance(result, list):
+                        return json.dumps(
+                            {"row_count": len(result), "data": result},
+                            indent=2,
+                        )
+                    if isinstance(result, str):
+                        # text/plain formats (csv, txt) — wrap so the
+                        # response shape is always JSON for MCP transport.
+                        return json.dumps(
+                            {"format": result_format, "data": result},
+                            indent=2,
+                        )
+                    return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("run_query", e)
+
+    @server.tool(
+        description=(
             "Get a dashboard definition and run all its tile queries. "
             "Returns the dashboard metadata and the data for each element."
         ),
@@ -250,7 +397,7 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
 
                     if query_id:
                         try:
-                            data = await session.get(f"/queries/{query_id}/run/json")
+                            data = await _execute_saved_query(session, query_id, "json")
                             elem_info["row_count"] = len(data) if isinstance(data, list) else 0
                             elem_info["data"] = data
                         except Exception:
