@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-19
+
+Adds a new opt-in **`render` tool group** wrapping Looker's
+`/render_tasks/*` API surface — the async create-poll-fetch pattern
+for turning Looker content into PNG, JPG, or PDF. Four tools cover
+the full subject matrix: `render_query` (ad-hoc explore that mirrors
+the existing `query` tool's `model`/`view`/`fields`/`filters`/`sorts`
+surface), `render_look` (saved Look), `render_dashboard` (full
+dashboard — the only subject that supports PDF, with
+`pdf_paper_size`, `pdf_landscape`, `long_tables`, `theme`, and a
+typed `dashboard_filters: dict[str, str]`), and
+`render_dashboard_tile` (individual dashboard element). The four
+share a `_create_and_wait_for_render_task` helper that owns the
+create endpoint POST, the bounded `GET /render_tasks/{id}` poll on
+a 0.5s → 1s → 2s capped backoff, and the binary `GET /results`
+fetch — so the per-subject paths cannot drift on path shape,
+terminal-state handling, or failure-detail propagation. Three
+recoverable conditions return JSON escape-hatch payloads carrying
+the `render_task_id` so callers can recover an in-flight render
+without restarting: a polling-deadline timeout, a `width * height`
+over 16-megapixel client-side cap, and an oversized-result hit
+against the 10 MB MCP transport budget. A new
+`LookerSession.get_bytes(path, *, max_bytes=…)` transport helper
+streams the binary response via `httpx.stream()` + `aiter_bytes()`
+and short-circuits via `Content-Length` when the server provides
+it, so an oversized render never fully materializes in memory —
+the streaming early-break is the fallback for servers that omit
+the header. The `render` group is added to `ALL_GROUPS` but
+**not** to `DEFAULT_GROUPS`: image rendering is opt-in, enabled
+with `--groups …,render` or `--groups all`.
+
+### Added
+
+- **`render_query`, `render_look`, `render_dashboard`, and
+  `render_dashboard_tile` tools** in a new `render` group
+  (`src/looker_mcp_server/tools/render.py`). Binary results
+  round-trip through the MCP envelope as FastMCP's typed helpers:
+  `fastmcp.utilities.types.Image(format="png"|"jpg")` serializes to
+  MCP `ImageContent` (LLM-visible); `File(format="pdf")` serializes
+  to `EmbeddedResource` with `BlobResourceContents` (clients render
+  or save it). `render_dashboard`'s `dashboard_filters` parameter
+  is a typed `dict[str, str]` that's URL-encoded internally into
+  the `?Foo=bar&Baz=qux` shape Looker's API expects, keeping the
+  surface symmetric with the existing `query` tool's `filters`
+  parameter. PDF-only knobs (`pdf_paper_size`, `pdf_landscape`,
+  `long_tables`) are gated on `result_format == "pdf"` so an image
+  render never carries page-orientation hints Looker has no use
+  for; `theme` and `dashboard_filters` stay format-agnostic since
+  both apply to all dashboard render formats. `render_query`
+  honours the same `dev_mode` + `branch` + `project_id` +
+  `act_as_user` parameter set as the existing `query` tool, so the
+  ad-hoc explore can be validated against a feature branch with
+  atomic save → swap → run → restore semantics. Polling deadlines
+  default to 120 s for image renders and 180 s for dashboards
+  (PDFs commonly take 30-90 s); on timeout the tool returns
+  `{status: "timeout", render_task_id, last_status, runtime_meta}`
+  so the caller can fetch the bytes directly from Looker once the
+  task finishes.
+- **`LookerSession.get_bytes(path, *, max_bytes=None)`** in
+  `looker_mcp_server.client`. Returns `(body_bytes, content_type,
+  total_bytes, truncated)`. When `max_bytes` is set, the helper
+  first inspects `Content-Length` and short-circuits the download
+  entirely if the advertised size exceeds the cap; otherwise it
+  streams via `aiter_bytes()` and stops appending as soon as the
+  running total passes the cap. The transport budget keeps a
+  single oversized render from spiking server memory under
+  concurrent load. Reuses the same `_raise_for_status` 4xx/5xx
+  body-parsing contract as `get` and `get_text`, so structured
+  Looker error bodies still reach callers as `LookerApiError`
+  carrying the full error envelope.
+- **`render` tool group registration** in
+  `looker_mcp_server.server`'s `_group_registry` and `ALL_GROUPS`
+  (`config.py`). Opt-in only — not added to `DEFAULT_GROUPS` since
+  rendering exercises a different transport-budget path than the
+  read-oriented default groups. Enable with `--groups …,render`,
+  `LOOKER_GROUPS=…,render`, or `--groups all`.
+
 ## [0.17.0] - 2026-05-14
 
 Small follow-up release adding **`run_query`**, the missing peer to
