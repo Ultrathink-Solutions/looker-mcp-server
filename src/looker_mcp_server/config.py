@@ -71,6 +71,7 @@ ALL_GROUPS = frozenset(
     {
         "explore",
         "query",
+        "render",
         "schema",
         "content",
         "board",

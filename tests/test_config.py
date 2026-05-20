@@ -89,6 +89,7 @@ class TestGroupConstants:
         expected = {
             "explore",
             "query",
+            "render",
             "schema",
             "content",
             "board",
