@@ -164,6 +164,7 @@ def create_server(
     from .tools.identity import register_identity_tools
     from .tools.modeling import register_modeling_tools
     from .tools.query import register_query_tools
+    from .tools.render import register_render_tools
     from .tools.schema import register_schema_tools
     from .tools.user_attributes import register_user_attribute_tools
     from .tools.workflows import register_workflow_tools
@@ -171,6 +172,7 @@ def create_server(
     _group_registry: dict[str, Any] = {
         "explore": register_explore_tools,
         "query": register_query_tools,
+        "render": register_render_tools,
         "schema": register_schema_tools,
         "content": register_content_tools,
         "board": register_board_tools,

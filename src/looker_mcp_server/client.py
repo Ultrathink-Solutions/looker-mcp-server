@@ -117,6 +117,41 @@ class LookerSession:
         """POST to an endpoint that returns ``text/plain`` (deploy-key rotation)."""
         return await self._request_text("POST", path, params=params)
 
+    async def get_bytes(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[bytes, str, int, bool]:
+        """GET an endpoint that returns binary content (image/png|jpeg, application/pdf).
+
+        Returns ``(body_bytes, content_type, total_bytes, truncated)``:
+
+        * ``body_bytes`` — accumulated content. Empty when the response
+          is short-circuited by Content-Length, or contains the prefix
+          read before the cap fired on a chunk boundary.
+        * ``total_bytes`` — bytes seen on the wire (or Content-Length
+          when the fast path triggered). Always set, even when truncated.
+        * ``truncated`` — True when ``max_bytes`` was provided and the
+          response exceeded it. Body is not safe to use in this case;
+          callers must surface the size signal to the user.
+
+        When ``max_bytes`` is set:
+
+        * If the server returns a ``Content-Length`` header larger than
+          ``max_bytes``, no body is downloaded — the helper returns
+          immediately with ``body=b""`` and ``truncated=True``.
+        * Otherwise the response is streamed; appending stops as soon
+          as the running total exceeds the cap.
+
+        Looker's render-task results endpoint (``/render_tasks/{id}/results``)
+        is the canonical caller. Reuses :meth:`_raise_for_status` for
+        4xx/5xx so the structured error body still reaches callers as a
+        ``LookerApiError``.
+        """
+        return await self._request_bytes("GET", path, params=params, max_bytes=max_bytes)
+
     async def update_workspace(self, workspace_id: str) -> None:
         """Set the active workspace on this API session.
 
@@ -267,6 +302,63 @@ class LookerSession:
         )
         self._raise_for_status(response)
         return response.text
+
+    async def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[bytes, str, int, bool]:
+        # Stream the response so a render result larger than ``max_bytes``
+        # never fully materializes in memory. Error responses still go
+        # through ``_raise_for_status`` (after one explicit ``aread``) so
+        # the structured-body contract used by the JSON and text paths
+        # carries over to binary callers.
+        async with self._http.stream(
+            method,
+            path,
+            headers=self._headers,
+            params=params,
+        ) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                self._raise_for_status(response)  # always raises
+
+            # Strip parameters (charset, boundary) so callers can match
+            # on the bare MIME type without case-sensitivity surprises.
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+
+            # Trust ``Content-Length`` when the server provides it: if
+            # the advertised size already exceeds the cap, skip the
+            # download entirely. Looker's render-task results endpoint
+            # always sets Content-Length, so this is the common path
+            # for oversized renders.
+            if max_bytes is not None:
+                cl_header = response.headers.get("content-length")
+                if cl_header is not None:
+                    try:
+                        cl = int(cl_header)
+                    except ValueError:
+                        cl = -1
+                    if cl > max_bytes:
+                        return b"", content_type, cl, True
+
+            # No fast path: stream and accumulate, stopping as soon as
+            # the running total passes the cap. We track ``total``
+            # independently of ``len(body)`` so the truncated case can
+            # still surface a size signal (lower bound = cap + 1).
+            body = bytearray()
+            total = 0
+            truncated = False
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    truncated = True
+                    break
+                body.extend(chunk)
+            return bytes(body), content_type, total, truncated
 
 
 class LookerClient:
