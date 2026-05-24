@@ -4,7 +4,11 @@ Sits in front of the MCP app and the PRM route. In ``LOOKER_MCP_MODE=
 public``:
 
 - Requests to unauthenticated paths (``/.well-known/*``, ``/healthz``,
-  ``/readyz``) pass straight through.
+  ``/readyz``, ``/_introspect``) pass straight through. The
+  ``/_introspect`` gateway-aggregator discovery route enforces its
+  own optional shared-bearer check (see
+  :mod:`looker_mcp_server.introspect`); this middleware deliberately
+  stays out of its way so discovery still works in public mode.
 - Requests carrying a bearer token in the URL query (``?access_token=``
   or ``?authorization=``) receive a 400 with an OAuth 2.1
   ``invalid_request`` body — OAuth 2.1 §5.1.1 bans URL-query-string
@@ -48,6 +52,7 @@ _BYPASS_PREFIXES: tuple[str, ...] = (
     "/.well-known/",
     "/healthz",
     "/readyz",
+    "/_introspect",
 )
 
 
