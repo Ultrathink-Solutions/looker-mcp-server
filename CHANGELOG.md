@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-05-24
+
+Two changes targeting deployments where this server sits behind a
+gateway aggregator that fronts multiple MCP servers. First, a new
+host-root **`/_introspect`** route serves the MCP discovery slice
+(`initialize`, `notifications/initialized`, `tools/list`) without
+requiring a user JWT, so the aggregator can populate its tool
+catalog at registration time without holding service-account
+credentials at this backend — `tools/call` is rejected
+(`-32601`); execution still flows through `/mcp` where the user
+JWT validates. The route is open by default and operators are
+expected to compose at least one of (a) network controls
+restricting ingress to `/_introspect` to the trusted aggregator's
+pod or subnet, and (b) the optional `LOOKER_MCP_INTROSPECT_BEARER`
+env var, which when set requires `Authorization: Bearer <value>`
+on all three methods (POST, GET, DELETE) and 401s otherwise. The
+endpoint is mounted only on `streamable-http` transport; `stdio`
+deployments don't sit behind a gateway and don't get the route.
+Second, **`/readyz`** no longer requires `LOOKER_CLIENT_ID` /
+`LOOKER_CLIENT_SECRET` in external-identity deployments (OAuth
+pass-through, sudo-by-header) where per-request user tokens supply
+auth at tool-invoke time. With service-account credentials
+configured, behavior is unchanged (live login/logout cycle);
+without them, the probe issues a no-auth `HEAD` against
+`LOOKER_BASE_URL` and returns 503 only on transport-layer failures
+(DNS, connection refused, TLS error, timeout) — fixing a
+fail-closed bug where K8s readiness probes would 503 forever and
+roll back atomic Helm installs.
+
 ### Added
 
 - **Host-root `/_introspect` endpoint for gateway tool discovery
