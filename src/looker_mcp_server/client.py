@@ -500,6 +500,33 @@ class LookerClient:
         except Exception:
             return False
 
+    async def check_reachability(self) -> bool:
+        """Verify the configured ``base_url`` is network-reachable, no auth.
+
+        Issues a single HEAD against the Looker instance's web root. Any
+        HTTP response — including 401/403/404 — proves DNS resolution,
+        TCP connect, and TLS handshake all succeeded, which is all a
+        readiness probe needs to assert in deployments where the server
+        does not hold API3 service-account credentials (e.g. OAuth
+        pass-through, where per-request user tokens supply auth). Only
+        transport-layer failures (DNS, connection refused, TLS error,
+        timeout) return ``False``.
+
+        Per-request auth is validated at tool-invoke time; readiness is a
+        liveness-of-dependency check, not an auth check.
+        """
+        if not self._config.base_url:
+            return False
+        try:
+            response = await self._http.head(
+                self._config.base_url,
+                follow_redirects=False,
+                timeout=httpx.Timeout(5.0),
+            )
+            return 100 <= response.status_code < 600
+        except httpx.HTTPError:
+            return False
+
     async def lookup_user_by_email(self, email: str) -> str | None:
         """Resolve a Looker user ID from an email address.
 

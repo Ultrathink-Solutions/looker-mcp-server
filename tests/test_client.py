@@ -564,3 +564,64 @@ class TestCheckConnectivity:
         client = LookerClient(config, provider)
         assert await client.check_connectivity() is False
         await client.close()
+
+
+class TestCheckReachability:
+    """``check_reachability`` is the no-auth probe used by ``/readyz`` in
+    external-identity deployments (no API3 service-account credentials
+    configured). Any HTTP response from the configured ``base_url`` is
+    treated as proof the dependency is up — only transport-layer
+    failures return ``False``.
+    """
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_true_on_2xx(self, config):
+        respx.head(config.base_url).mock(return_value=httpx.Response(200))
+
+        provider = ApiKeyIdentityProvider("", "")
+        client = LookerClient(config, provider)
+        assert await client.check_reachability() is True
+        await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_true_on_unauthenticated_response(self, config):
+        """A 401 from the Looker web root still proves the instance is
+        reachable. Readiness is a liveness-of-dependency check; auth is
+        validated per-request at tool-invoke time, not here.
+        """
+        respx.head(config.base_url).mock(return_value=httpx.Response(401))
+
+        provider = ApiKeyIdentityProvider("", "")
+        client = LookerClient(config, provider)
+        assert await client.check_reachability() is True
+        await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_false_on_connection_error(self, config):
+        respx.head(config.base_url).mock(side_effect=httpx.ConnectError("refused"))
+
+        provider = ApiKeyIdentityProvider("", "")
+        client = LookerClient(config, provider)
+        assert await client.check_reachability() is False
+        await client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_false_on_timeout(self, config):
+        respx.head(config.base_url).mock(side_effect=httpx.ConnectTimeout("timed out"))
+
+        provider = ApiKeyIdentityProvider("", "")
+        client = LookerClient(config, provider)
+        assert await client.check_reachability() is False
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_without_base_url(self):
+        config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        provider = ApiKeyIdentityProvider("", "")
+        client = LookerClient(config, provider)
+        assert await client.check_reachability() is False
+        await client.close()

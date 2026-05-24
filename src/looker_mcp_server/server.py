@@ -264,16 +264,29 @@ def create_server(
                 {"status": "not_ready", "reason": "LOOKER_BASE_URL not configured"},
                 status_code=503,
             )
-        if not config.client_id or not config.client_secret:
-            return JSONResponse(
-                {"status": "not_ready", "reason": "LOOKER_CLIENT_ID/SECRET not configured"},
-                status_code=503,
-            )
 
-        ok = await client.check_connectivity()
+        # Two operating shapes are supported, gated on whether API3
+        # service-account credentials are configured:
+        #
+        # 1. Service-account mode (``client_id`` + ``client_secret``
+        #    both set): exercise a real login/logout cycle so readiness
+        #    asserts the creds are valid against this instance.
+        # 2. External-identity mode (creds absent): the server has no
+        #    standing identity at the Looker API — auth is supplied
+        #    per-request via an OAuth pass-through token or sudo
+        #    impersonation header. Readiness here is a
+        #    reachability-of-dependency check, not an auth check. Per-
+        #    request auth is validated at tool-invoke time.
+        if config.client_id and config.client_secret:
+            ok = await client.check_connectivity()
+            reason = "Cannot connect to Looker"
+        else:
+            ok = await client.check_reachability()
+            reason = "Looker base URL unreachable"
+
         if not ok:
             return JSONResponse(
-                {"status": "not_ready", "reason": "Cannot connect to Looker"},
+                {"status": "not_ready", "reason": reason},
                 status_code=503,
             )
         return JSONResponse({"status": "ready"})

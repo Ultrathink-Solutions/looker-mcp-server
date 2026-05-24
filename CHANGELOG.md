@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/readyz` no longer requires API3 service-account credentials in
+  external-identity deployments.** The readiness probe previously
+  asserted that both `LOOKER_CLIENT_ID` and `LOOKER_CLIENT_SECRET`
+  were set and exercised a live login/logout cycle against the Looker
+  API. That contract is correct for service-account mode but wrong
+  for deployments where the server has no standing identity — OAuth
+  pass-through (`X-User-Token`) or sudo-by-header
+  (`X-User-Email`) flows where per-request user tokens supply auth at
+  tool-invoke time. Such deployments would deliberately omit the
+  service-account credentials, then fail `kubelet` readiness checks
+  forever and roll back atomic Helm releases.
+
+  The route now branches on whether both API3 credentials are
+  configured. With them, behavior is unchanged (live login/logout
+  cycle). Without them, the probe issues a no-auth `HEAD` against
+  `LOOKER_BASE_URL` via a new `LookerClient.check_reachability` —
+  any HTTP response (including `401`) proves the dependency is
+  reachable, only transport-layer failures (DNS, connection refused,
+  TLS error, timeout) return `503`. Auth is validated per-request at
+  tool-invoke time; readiness is a liveness-of-dependency check.
+
 ## [0.18.0] - 2026-05-19
 
 Adds a new opt-in **`render` tool group** wrapping Looker's
