@@ -148,6 +148,33 @@ def create_server(
         auth=auth,
     )
 
+    # ── Gateway-aggregator discovery endpoint ────────────────────────
+    # Mount the unauthenticated ``/_introspect`` host-root endpoint on
+    # HTTP transport. A gateway that fronts multiple MCP servers calls
+    # it at registration time to populate its routable tool catalog
+    # without holding service-account credentials at each backend.
+    # Execution still flows through ``/mcp`` with the user JWT.
+    #
+    # Trust composition (network controls and/or
+    # ``LOOKER_MCP_INTROSPECT_BEARER``) is the operator's responsibility
+    # — see ``looker_mcp_server.introspect`` for the operator-facing
+    # guidance. ``stdio`` transport doesn't need this route (no gateway,
+    # no discovery flow).
+    if config.is_http():
+        from importlib import metadata
+
+        from .introspect import register_introspect_endpoint
+
+        try:
+            pkg_version = metadata.version("looker-mcp-server")
+        except metadata.PackageNotFoundError:
+            pkg_version = "0.0.0"
+        register_introspect_endpoint(
+            mcp,
+            server_name="looker-mcp-server",
+            server_version=pkg_version,
+        )
+
     # ── Register tool groups ─────────────────────────────────────────
     groups = enabled_groups or DEFAULT_GROUPS
 

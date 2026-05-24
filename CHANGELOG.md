@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Host-root `/_introspect` endpoint for gateway tool discovery
+  (open by default; optional shared-bearer guard).** A new route at
+  `/_introspect` — mounted alongside but separate from the
+  authenticated `/mcp` route — serves the MCP discovery slice
+  (`initialize`, `notifications/initialized`, `tools/list`) so a
+  gateway aggregator that fronts multiple MCP servers can populate
+  its tool catalog at registration time without holding
+  service-account credentials at each backend. `tools/call` is
+  rejected (`-32601`); execution still flows through `/mcp` where
+  the user JWT validates.
+
+  **Security posture — operators must read.** The route is mounted
+  at host root (the `/mcp` OAuth 2.1 middleware deliberately does
+  not see it). It does NOT require a user JWT, and by default
+  accepts requests from any network-reachable caller. Operators
+  must compose at least one of the following defenses:
+
+  1. **Network controls (primary; recommended for cluster
+     deployments).** Restrict ingress to `/_introspect` so it is
+     reachable only from the trusted gateway aggregator's pod or
+     subnet. External ingress should expose only `/mcp/*` and the
+     well-known PRM document.
+  2. **Application-layer shared bearer.** Set
+     `LOOKER_MCP_INTROSPECT_BEARER` to any opaque token. When set,
+     all three methods (POST, GET, DELETE) require
+     `Authorization: Bearer <value>` and respond `401` otherwise;
+     the aggregator is configured with the same token out-of-band.
+     When unset (the default), the endpoint is **open** and the
+     operator is implicitly relying on network-layer isolation.
+
+  The route also accepts `GET` (204 — empty server-push stream
+  placeholder) and `DELETE` (200 — session teardown ack) so a
+  well-behaved MCP Streamable HTTP client doesn't log 405 errors on
+  every discovery cycle. The optional bearer guard, when configured,
+  applies uniformly to all three methods.
+
+  Wiring details: the route is mounted only on `streamable-http`
+  transport — `stdio` deployments don't sit behind a gateway and
+  don't get the route. The OAuth 2.1 resource-server middleware
+  (active in `LOOKER_MCP_MODE=public`) exempts `/_introspect` from
+  its token check, since the route enforces its own optional bearer
+  instead.
+
+  Cited precedent: [Strawberry GraphQL Federation](https://strawberry.rocks/docs/guides/federation),
+  [Apollo Federation v1 spec](https://www.apollographql.com/docs/federation/v1/federation-spec/).
+
 ### Fixed
 
 - **`/readyz` no longer requires API3 service-account credentials in
