@@ -150,10 +150,10 @@ All settings are configured via environment variables with the `LOOKER_` prefix,
 | `LOOKER_MAX_ROWS` | `5000` | Default maximum rows for query tools |
 | `LOOKER_VERIFY_SSL` | `true` | Verify TLS certificates |
 | `LOOKER_LOG_LEVEL` | `INFO` | Logging level |
-| `LOOKER_MCP_MODE` | `dev` | `dev` (permissive) or `public` (OAuth 2.1 resource-server, MCP 2025-11-25). See [MCP-Level Authentication](#mcp-level-authentication). |
+| `LOOKER_MCP_MODE` | `dev` | `dev` (permissive), `public` (OAuth 2.1 resource-server, MCP 2025-11-25), or `looker_oauth` (Looker-as-authorization-server, opaque per-user tokens). See [MCP-Level Authentication](#mcp-level-authentication). |
 | `LOOKER_MCP_JWKS_URI` | | Authorization server JWK Set URL (RFC 7517). **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL. |
 | `LOOKER_MCP_ISSUER_URL` | | Expected `iss` claim (RFC 8414). **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL. |
-| `LOOKER_MCP_RESOURCE_URI` | | This server's canonical URI for RFC 8707 audience binding and the RFC 9728 PRM `resource` field. **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL without fragment. |
+| `LOOKER_MCP_RESOURCE_URI` | | This server's canonical URI for RFC 8707 audience binding and the RFC 9728 PRM `resource` field. **Required when `LOOKER_MCP_MODE=public` or `looker_oauth`** (in `looker_oauth` it is this MCP server's own public URI — the host of the `resource_metadata` PRM URL — and has no default, since it must not point at Looker's host). Must be an `https://` URL without fragment. |
 | `LOOKER_MCP_AUTH_TOKEN` | | Static bearer token for MCP-level authentication. **Deprecated** — emits a warning in `dev` mode, rejected outright in `public` mode (RFC 9068 §2.1 forbids symmetric static bearers for OAuth 2.1 access tokens). Scheduled for removal in a future major release; migrate to `LOOKER_MCP_MODE=public`. |
 
 ## Authentication & Impersonation
@@ -399,7 +399,7 @@ The `RequestContext` provides:
 
 ## MCP-Level Authentication
 
-MCP-level authentication (who can connect to the server) has two modes, selected by `LOOKER_MCP_MODE`.
+MCP-level authentication (who can connect to the server) has three modes, selected by `LOOKER_MCP_MODE`.
 
 ### `LOOKER_MCP_MODE=dev` (default) — permissive
 
@@ -431,6 +431,30 @@ export LOOKER_MCP_RESOURCE_URI="https://looker-mcp.example.com/mcp"
 ```
 
 All three URIs must be absolute `https://` URLs; the server fails closed at startup with a typed `DeploymentPostureError` if any are missing, malformed, or use `http://`. The `LOOKER_MCP_RESOURCE_URI` must not carry a fragment (RFC 9728 §3).
+
+### `LOOKER_MCP_MODE=looker_oauth` — Looker is the authorization server
+
+For deployments where you want **Looker itself** to be the authorization server and the MCP server to hold **no admin credentials and no sudo capability** at all. The client runs a Looker PKCE flow directly against the Looker instance, obtains an **opaque** per-user Looker access token, and presents it to the MCP server as `Authorization: Bearer <opaque-token>`. The server:
+
+- Advertises **Looker** (the `LOOKER_BASE_URL`) as the authorization server in its RFC 9728 Protected Resource Metadata, so MCP clients auto-discover the Looker OAuth endpoints to run PKCE against.
+- Verifies every inbound token by calling Looker's `GET /user` introspection endpoint — the request is accepted **iff** Looker returns a valid user, and rejected (401 `invalid_token`) on an expired / revoked / malformed token, a non-200 response, or a Looker transport failure (fail-closed).
+- Forwards the verified opaque token to Looker as the session token, so the **user's own Looker permissions** govern every API call. This sidesteps the `X-User-*` identity envelope entirely.
+- Keeps the same HTTP contract as `public` mode: 400 on URL-query bearers (OAuth 2.1 §5.1.1), realm-bearing `WWW-Authenticate` challenges on 401, anonymous `/.well-known/*` + `/healthz` + `/readyz` + `/_introspect`.
+- **Rejects `LOOKER_MCP_AUTH_TOKEN` outright** — a shared static bearer would defeat the per-user identity this posture exists to enforce.
+
+Required configuration (the Looker base URL + this MCP server's own public URI — no JWKS, issuer, or admin credentials):
+
+```bash
+export LOOKER_MCP_MODE=looker_oauth
+export LOOKER_BASE_URL="https://yourco.looker.com"   # Looker instance; must be https
+# This MCP server's own public URI: the RFC 9728 `resource` identifier and the
+# host of the `resource_metadata` PRM URL clients fetch. Must be this server,
+# NOT Looker — the MCP server serves the PRM. Required; no default.
+export LOOKER_MCP_RESOURCE_URI="https://looker-mcp.example.com/mcp"   # must be https
+export LOOKER_TRANSPORT=streamable-http
+```
+
+`LOOKER_BASE_URL` must be an absolute `https://` URL — opaque tokens travel over this connection and must not cross a plaintext hop. The server fails closed at startup with a typed `DeploymentPostureError` otherwise.
 
 #### Deprecation timeline for `LOOKER_MCP_AUTH_TOKEN`
 
@@ -490,7 +514,7 @@ When running in HTTP mode, the server exposes:
 
 - `GET /healthz` — liveness probe (always returns 200 if server is running)
 - `GET /readyz` — readiness probe (verifies Looker connectivity with a login/logout cycle)
-- `GET /.well-known/oauth-protected-resource` — RFC 9728 Protected Resource Metadata (only when `LOOKER_MCP_MODE=public`). When `LOOKER_MCP_RESOURCE_URI` has a path, the same document is also served at `/.well-known/oauth-protected-resource<resource-path>` — that is the spec-canonical URL per RFC 9728 §3, and the one referenced by `resource_metadata=...` in 401 `WWW-Authenticate` challenges.
+- `GET /.well-known/oauth-protected-resource` — RFC 9728 Protected Resource Metadata (served when `LOOKER_MCP_MODE=public` or `LOOKER_MCP_MODE=looker_oauth`). In `public` mode it advertises the configured `LOOKER_MCP_ISSUER_URL` as the authorization server; in `looker_oauth` mode it advertises the Looker base URL. When the resource identifier has a path, the same document is also served at `/.well-known/oauth-protected-resource<resource-path>` — that is the spec-canonical URL per RFC 9728 §3, and the one referenced by `resource_metadata=...` in 401 `WWW-Authenticate` challenges.
 
 ## Development
 

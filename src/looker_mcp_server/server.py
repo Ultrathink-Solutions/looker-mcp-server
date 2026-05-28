@@ -15,6 +15,7 @@ from .identity import (
     ArgumentSudoIdentityProvider,
     DualModeIdentityProvider,
     IdentityProvider,
+    OAuthIdentityProvider,
 )
 
 logger = structlog.get_logger()
@@ -100,7 +101,21 @@ def create_server(
     caller_provided_provider = identity_provider is not None
 
     if identity_provider is None:
-        if config.sudo_as_user and config.client_id and config.client_secret:
+        if config.mcp_mode == LookerMcpMode.LOOKER_OAUTH:
+            # Looker-as-authorization-server posture: the server holds NO
+            # admin credentials and NO sudo. The inbound opaque Looker token
+            # (already introspected by the auth middleware) arrives in the
+            # standard ``Authorization: Bearer`` header; forward it verbatim
+            # as the Looker session token so the user's own permissions
+            # govern the call. No fallback credentials — a request that
+            # reaches a tool with no token must fail, never silently borrow a
+            # shared identity. The argument-sudo wrapper is intentionally
+            # skipped (it requires admin creds this posture doesn't have).
+            identity_provider = OAuthIdentityProvider(
+                token_header="Authorization",
+                strip_bearer_scheme=True,
+            )
+        elif config.sudo_as_user and config.client_id and config.client_secret:
             identity_provider = DualModeIdentityProvider(
                 client_id=config.client_id,
                 client_secret=config.client_secret,
@@ -125,7 +140,15 @@ def create_server(
         # would then see ``act_as_user`` calls succeed as the wrong
         # user). Transparent when ``act_as_user`` is absent; skipped
         # entirely for caller-supplied providers (caller owns auth chain).
-        if config.client_id and config.client_secret:
+        # ``looker_oauth`` is a no-credential / no-sudo posture: even if API3
+        # creds happen to be present in the environment, the OAuth provider
+        # must stay unwrapped, or act_as_user escalation would silently
+        # re-enable the very capability the posture exists to forbid.
+        if (
+            config.mcp_mode != LookerMcpMode.LOOKER_OAUTH
+            and config.client_id
+            and config.client_secret
+        ):
             identity_provider = ArgumentSudoIdentityProvider(
                 inner=identity_provider,
                 client_id=config.client_id,
@@ -224,14 +247,15 @@ def create_server(
 
     logger.info("looker.server.created", groups=registered)
 
-    # ── OIDC public-mode PRM route ──────────────────────────────────
-    # In ``LOOKER_MCP_MODE=public`` we serve the RFC 9728 Protected
-    # Resource Metadata document so MCP clients can auto-discover the
-    # authorization server after a 401. The token gate itself lives in
-    # ``PublicModeAuthMiddleware`` (wired into the HTTP transport by
-    # ``main.py`` via :func:`build_public_mode_middleware`); these
-    # routes are deliberately bypassed by that middleware's
-    # ``/.well-known/`` allowlist so discovery stays anonymous.
+    # ── OIDC PRM route (public + looker_oauth modes) ────────────────
+    # In ``LOOKER_MCP_MODE=public`` and ``LOOKER_MCP_MODE=looker_oauth`` we
+    # serve the RFC 9728 Protected Resource Metadata document so MCP clients
+    # can auto-discover the authorization server after a 401. The token gate
+    # itself lives in the mode-specific auth middleware (wired into the HTTP
+    # transport by ``main.py`` via :func:`build_public_mode_middleware` /
+    # :func:`build_looker_oauth_mode_middleware`); these routes are
+    # deliberately bypassed by that middleware's ``/.well-known/`` allowlist
+    # so discovery stays anonymous.
     #
     # RFC 9728 §3 constructs the PRM URL by inserting
     # ``/.well-known/oauth-protected-resource`` between the authority
@@ -245,15 +269,30 @@ def create_server(
     # - The root ``PRM_PATH`` stays available as a defensive fallback
     #   for clients that probe the origin well-known location before
     #   following the challenge hint.
-    if config.mcp_mode == LookerMcpMode.PUBLIC:
+    # ``looker_oauth`` mode also serves a PRM, but with Looker itself as the
+    # advertised authorization server (so the client runs a Looker PKCE flow)
+    # and the MCP server's own URI as the resource. ``public`` mode advertises
+    # the configured JWKS-backed OIDC issuer instead. Both share the same
+    # route-mounting + caching shape below.
+    if config.mcp_mode in (LookerMcpMode.PUBLIC, LookerMcpMode.LOOKER_OAUTH):
         from .oidc import build_prm_document
+
+        if config.mcp_mode == LookerMcpMode.PUBLIC:
+            prm_resource_uri = config.mcp_resource_uri
+            prm_authorization_server = config.mcp_issuer_url
+        else:
+            # In looker_oauth mode Looker is the authorization server — point
+            # clients at the Looker base URL so PKCE discovery resolves to
+            # Looker's own OAuth endpoints (RFC 8414 metadata under the base).
+            prm_resource_uri = config.looker_oauth_resource_uri
+            prm_authorization_server = config.base_url
 
         def _prm_response() -> Any:
             from starlette.responses import JSONResponse
 
             doc = build_prm_document(
-                resource_uri=config.mcp_resource_uri,
-                authorization_server_issuer_url=config.mcp_issuer_url,
+                resource_uri=prm_resource_uri,
+                authorization_server_issuer_url=prm_authorization_server,
             )
             return JSONResponse(
                 doc,
@@ -268,7 +307,7 @@ def create_server(
         async def prm_root(request: Any) -> Any:
             return _prm_response()
 
-        suffix_path = _well_known_prm_path(config.mcp_resource_uri)
+        suffix_path = _well_known_prm_path(prm_resource_uri)
         if suffix_path != PRM_PATH:
 
             @mcp.custom_route(suffix_path, methods=["GET"])
@@ -304,7 +343,14 @@ def create_server(
         #    impersonation header. Readiness here is a
         #    reachability-of-dependency check, not an auth check. Per-
         #    request auth is validated at tool-invoke time.
-        if config.client_id and config.client_secret:
+        # ``looker_oauth`` is credential-free end-to-end: leftover API3 creds in
+        # the environment must NOT turn readiness into a service-account login
+        # check. Force the reachability path in that mode regardless of creds.
+        if (
+            config.mcp_mode != LookerMcpMode.LOOKER_OAUTH
+            and config.client_id
+            and config.client_secret
+        ):
             ok = await client.check_connectivity()
             reason = "Cannot connect to Looker"
         else:
@@ -380,5 +426,57 @@ def build_public_mode_middleware(config: LookerConfig) -> Any | None:
         PublicModeAuthMiddleware,
         resource_server=resource_server,
         realm=config.mcp_resource_uri,
+        prm_url=prm_url,
+    )
+
+
+def build_looker_oauth_mode_middleware(config: LookerConfig) -> Any | None:
+    """Build the opaque-token introspection middleware for HTTP transport.
+
+    Returns a :class:`starlette.middleware.Middleware` wrapper ready for
+    FastMCP's ``run_async(middleware=[...])`` kwarg when
+    ``config.mcp_mode == LookerMcpMode.LOOKER_OAUTH``, or ``None`` in any
+    other mode.
+
+    Unlike :func:`build_public_mode_middleware`, the inbound bearer is an
+    **opaque** Looker access token (no JWT structure), so the gate verifies
+    it by calling Looker ``GET /user`` (introspection against the resource
+    owner) rather than validating a JWKS signature. The contract otherwise
+    matches the public-mode gate:
+
+    - 400 on URL-query bearer tokens (OAuth 2.1 §5.1.1).
+    - 401 (+ ``WWW-Authenticate`` challenge pointing at the PRM) on missing /
+      malformed / unverifiable tokens.
+    - Pass-through on ``/.well-known/*``, ``/healthz``, ``/readyz``,
+      ``/_introspect``.
+
+    On success the request proceeds with the ``Authorization`` header intact
+    so the no-credential ``OAuthIdentityProvider`` can forward the verified
+    token to Looker as the session token.
+
+    Like its public-mode sibling this is a pure helper so ``main.py`` can
+    thread the returned value into the middleware chain ahead of
+    :class:`HeaderCaptureMiddleware` (auth gate must run outermost).
+    """
+    if config.mcp_mode != LookerMcpMode.LOOKER_OAUTH:
+        return None
+
+    from starlette.middleware import Middleware
+
+    from .oidc import LookerOAuthAuthMiddleware, LookerUserIntrospector
+
+    introspector = LookerUserIntrospector(
+        base_url=config.base_url,
+        api_version=config.api_version,
+        verify_ssl=config.verify_ssl,
+        timeout_seconds=config.timeout,
+    )
+    resource_uri = config.looker_oauth_resource_uri
+    prm_url = _well_known_prm_url(resource_uri)
+
+    return Middleware(
+        LookerOAuthAuthMiddleware,
+        introspector=introspector,
+        realm=resource_uri,
         prm_url=prm_url,
     )

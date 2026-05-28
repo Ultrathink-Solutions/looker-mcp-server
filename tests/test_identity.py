@@ -138,6 +138,98 @@ class TestOAuthIdentityProvider:
             await provider.resolve(ctx)
 
 
+class TestOAuthIdentityProviderBearerScheme:
+    """The ``looker_oauth``-mode shape: read the opaque token straight from
+    the ``Authorization`` header, stripping the ``Bearer`` scheme prefix, with
+    NO fallback credentials configured."""
+
+    def _provider(self) -> OAuthIdentityProvider:
+        return OAuthIdentityProvider(
+            token_header="Authorization",
+            strip_bearer_scheme=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_strips_bearer_scheme_from_authorization_header(self):
+        ctx = RequestContext(
+            headers={"authorization": "Bearer opaque-looker-token"},
+            tool_name="query",
+            tool_group="query",
+        )
+        identity = await self._provider().resolve(ctx)
+        assert identity.mode == "oauth"
+        assert identity.access_token == "opaque-looker-token"
+
+    @pytest.mark.asyncio
+    async def test_bearer_scheme_case_insensitive(self):
+        ctx = RequestContext(
+            headers={"authorization": "bearer opaque-looker-token"},
+            tool_name="query",
+            tool_group="query",
+        )
+        identity = await self._provider().resolve(ctx)
+        assert identity.access_token == "opaque-looker-token"
+
+    @pytest.mark.asyncio
+    async def test_bare_token_without_scheme_passes_through(self):
+        """A token with no ``Bearer `` prefix (no space) is used verbatim."""
+        ctx = RequestContext(
+            headers={"authorization": "opaque-looker-token"},
+            tool_name="query",
+            tool_group="query",
+        )
+        identity = await self._provider().resolve(ctx)
+        assert identity.access_token == "opaque-looker-token"
+
+    @pytest.mark.asyncio
+    async def test_non_bearer_scheme_rejected(self):
+        """A non-Bearer scheme (e.g. ``Basic``) is never forwarded as a token."""
+        ctx = RequestContext(
+            headers={"authorization": "Basic dXNlcjpwYXNz"},
+            tool_name="query",
+            tool_group="query",
+        )
+        with pytest.raises(PermissionError):
+            await self._provider().resolve(ctx)
+
+    @pytest.mark.asyncio
+    async def test_empty_bearer_rejected(self):
+        """``Bearer `` with no token is rejected, not forwarded as an empty token."""
+        ctx = RequestContext(
+            headers={"authorization": "Bearer "},
+            tool_name="query",
+            tool_group="query",
+        )
+        with pytest.raises(PermissionError):
+            await self._provider().resolve(ctx)
+
+    @pytest.mark.asyncio
+    async def test_malformed_scheme_rejected_even_with_fallback(self):
+        """A malformed scheme-bearing header is rejected outright — never
+        silently downgraded to API-key fallback creds."""
+        provider = OAuthIdentityProvider(
+            token_header="Authorization",
+            fallback_client_id="fallback-id",
+            fallback_client_secret="fallback-secret",
+            strip_bearer_scheme=True,
+        )
+        ctx = RequestContext(
+            headers={"authorization": "Basic dXNlcjpwYXNz"},
+            tool_name="query",
+            tool_group="query",
+        )
+        with pytest.raises(PermissionError):
+            await provider.resolve(ctx)
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_raises_without_token(self):
+        """The no-credential posture omits fallback creds — a missing token
+        must raise, never silently borrow a shared identity."""
+        ctx = RequestContext(headers={}, tool_name="query", tool_group="query")
+        with pytest.raises(PermissionError):
+            await self._provider().resolve(ctx)
+
+
 class TestDualModeIdentityProvider:
     @pytest.mark.asyncio
     async def test_self_hosted_uses_sudo_path(self):

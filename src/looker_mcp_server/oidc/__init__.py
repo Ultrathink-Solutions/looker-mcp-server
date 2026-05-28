@@ -9,18 +9,31 @@ Modules:
   per RFC 8707 §2. Issuer binding per RFC 8414.
 - :mod:`looker_mcp_server.oidc.prm` — Protected Resource Metadata document
   (RFC 9728 §2) + route factory.
+- :mod:`looker_mcp_server.oidc.looker_introspection` — opaque-token verifier
+  + ASGI gate for ``LOOKER_MCP_MODE=looker_oauth``, where Looker is its own
+  authorization server and the inbound bearer is an opaque Looker access
+  token verified via ``GET /user`` (this module IS Looker-specific, unlike
+  the rest of the package — see below).
 - :mod:`looker_mcp_server.oidc.www_authenticate` — 401/403 challenge
   builders. ``realm=`` is mandatory per RFC 7235 §4.1; ``quoted-string``
   escaping follows RFC 7230 §3.2.6.
 
-Nothing in this package imports Looker-specific types — the primitives
-are vendor-neutral and suitable for reuse by adopters building their own
-resource servers against the same spec family.
+With the sole exception of :mod:`~looker_mcp_server.oidc.looker_introspection`
+(the ``looker_oauth``-mode opaque-token verifier, which is inherently
+Looker-specific), nothing in this package imports Looker types — the JWT /
+JWKS / PRM primitives are vendor-neutral and suitable for reuse by adopters
+building their own resource servers against the same spec family.
 """
 
 from __future__ import annotations
 
 from .jwks import ALLOWED_SIGNING_ALGORITHMS, JWKSCache, JWKSError
+from .looker_introspection import (
+    LookerOAuthAuthMiddleware,
+    LookerUser,
+    LookerUserIntrospector,
+    OpaqueTokenVerificationError,
+)
 from .middleware import PublicModeAuthMiddleware
 from .prm import ProtectedResourceMetadata, build_prm_document
 from .resource_server import (
@@ -38,7 +51,11 @@ __all__ = [
     "ALLOWED_SIGNING_ALGORITHMS",
     "JWKSCache",
     "JWKSError",
+    "LookerOAuthAuthMiddleware",
+    "LookerUser",
+    "LookerUserIntrospector",
     "OAuth21ResourceServer",
+    "OpaqueTokenVerificationError",
     "ProtectedResourceMetadata",
     "PublicModeAuthMiddleware",
     "TokenVerificationError",

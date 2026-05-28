@@ -387,6 +387,79 @@ class TestMcpModePosture:
             config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
         assert config.mcp_resource_uri == "https://looker.example.com/mcp"
 
+    def test_looker_oauth_mode_rejects_http_resource_uri(self):
+        """An operator-pinned LOOKER_MCP_RESOURCE_URI must be https in
+        looker_oauth mode even though it is optional there."""
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_RESOURCE_URI="http://looker.example.com/mcp",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_RESOURCE_URI_NOT_HTTPS
+
+    def test_looker_oauth_mode_rejects_resource_uri_with_fragment(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_RESOURCE_URI="https://looker.example.com/mcp#frag",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.PUBLIC_RESOURCE_URI_MALFORMED
+
+    def test_looker_oauth_mode_requires_resource_uri(self):
+        """The resource URI is REQUIRED in looker_oauth — it is the MCP
+        server's own URI and the host of the ``resource_metadata`` PRM URL,
+        which must not default to Looker's host."""
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(LOOKER_MCP_MODE="looker_oauth"),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.LOOKER_OAUTH_MISSING_RESOURCE_URI
+
+    def test_looker_oauth_mode_rejects_base_url_with_query_or_fragment(self):
+        """LOOKER_BASE_URL must be a bare https origin — a query/fragment would
+        corrupt the ``/api/<ver>/user`` introspection URL."""
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_BASE_URL="https://example.looker.com/?x=1",
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_RESOURCE_URI="https://mcp.example.com",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.LOOKER_OAUTH_BASE_URL_INVALID
+
     def test_public_mode_happy_path(self):
         """All required env set + https resource URI → config resolves cleanly."""
         from looker_mcp_server.config import LookerMcpMode
@@ -415,3 +488,142 @@ class TestMcpModePosture:
         assert "detail" in str(err)
         # Backwards-compat with Pydantic validators expecting ValueError.
         assert isinstance(err, ValueError)
+
+
+class TestLookerOAuthModePosture:
+    """Tests for ``LOOKER_MCP_MODE=looker_oauth`` — the Looker-as-its-own-
+    authorization-server, opaque-token posture.
+
+    Unlike ``public`` mode, this posture does NOT require
+    ``LOOKER_MCP_JWKS_URI`` / ``LOOKER_MCP_ISSUER_URL`` / ``LOOKER_MCP_RESOURCE_URI``.
+    Looker is the authorization server and the inbound bearer is an opaque
+    Looker token verified via ``GET /user`` introspection. The only hard
+    requirement is a usable ``LOOKER_BASE_URL``; a shared static bearer is
+    forbidden because it would defeat the per-user identity.
+    """
+
+    def _env(self, **overrides: str) -> dict[str, str]:
+        base = {"LOOKER_BASE_URL": "https://example.looker.com"}
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _extract_posture_kind(exc_info):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import DeploymentPostureError
+
+        err = exc_info.value
+        assert isinstance(err, ValidationError), f"expected ValidationError, got {type(err)}"
+        details = err.errors()
+        # The looker_oauth validator is one of several model_validators; the
+        # one that raises is the only error reported.
+        ctx = details[0].get("ctx", {})
+        inner = ctx.get("error")
+        assert isinstance(inner, DeploymentPostureError), (
+            f"expected DeploymentPostureError inside ctx, got {type(inner)}"
+        )
+        return inner.kind
+
+    def test_looker_oauth_happy_path(self):
+        """``LOOKER_BASE_URL`` + ``LOOKER_MCP_RESOURCE_URI`` + the mode flag
+        resolve cleanly — no JWKS / issuer machinery needed."""
+        from looker_mcp_server.config import LookerMcpMode
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_RESOURCE_URI="https://mcp.example.com",
+            ),
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.mcp_mode == LookerMcpMode.LOOKER_OAUTH
+        # The OIDC-mode (JWKS/issuer) fields stay empty and are not required.
+        assert config.mcp_jwks_uri == ""
+        assert config.mcp_issuer_url == ""
+        assert config.looker_oauth_resource_uri == "https://mcp.example.com"
+
+    def test_looker_oauth_does_not_require_jwks_or_issuer(self):
+        """Regression guard: the public-mode validator MUST NOT fire in
+        looker_oauth mode (it would demand JWKS/issuer this posture omits)."""
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_RESOURCE_URI="https://mcp.example.com",
+            ),
+            clear=True,
+        ):
+            # Must not raise — no JWKS/issuer configured (resource URI is the
+            # only looker_oauth requirement beyond base_url).
+            LookerConfig(_env_file=None)  # type: ignore[call-arg]
+
+    def test_looker_oauth_requires_base_url(self):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            {"LOOKER_MCP_MODE": "looker_oauth"},  # no LOOKER_BASE_URL
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.LOOKER_OAUTH_MISSING_BASE_URL
+
+    @pytest.mark.parametrize(
+        "bad_base_url",
+        [
+            "http://example.looker.com",  # plaintext — opaque tokens must not cross it
+            "example.looker.com",  # no scheme
+            "https://",  # no host
+        ],
+    )
+    def test_looker_oauth_rejects_non_https_base_url(self, bad_base_url: str):
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            {"LOOKER_MCP_MODE": "looker_oauth", "LOOKER_BASE_URL": bad_base_url},
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert self._extract_posture_kind(exc) == PostureErrorKind.LOOKER_OAUTH_BASE_URL_NOT_HTTPS
+
+    def test_looker_oauth_rejects_static_bearer(self):
+        """A shared static bearer is the antithesis of per-user opaque tokens."""
+        from pydantic import ValidationError
+
+        from looker_mcp_server.config import PostureErrorKind
+
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_AUTH_TOKEN="shared-secret",
+            ),
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc:
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert (
+            self._extract_posture_kind(exc) == PostureErrorKind.LOOKER_OAUTH_STATIC_BEARER_FORBIDDEN
+        )
+
+    def test_looker_oauth_resource_uri_honors_explicit_override(self):
+        with patch.dict(
+            os.environ,
+            self._env(
+                LOOKER_MCP_MODE="looker_oauth",
+                LOOKER_MCP_RESOURCE_URI="https://looker-mcp.example.com/mcp",
+            ),
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.looker_oauth_resource_uri == "https://looker-mcp.example.com/mcp"

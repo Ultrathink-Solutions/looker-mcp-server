@@ -18,9 +18,14 @@ from typing import Any
 
 import structlog
 
-from .config import ALL_GROUPS, DEFAULT_GROUPS, LookerConfig
+from .config import ALL_GROUPS, DEFAULT_GROUPS, LookerConfig, LookerMcpMode
 from .middleware import HeaderCaptureMiddleware
-from .server import build_public_mode_middleware, create_server, parse_groups
+from .server import (
+    build_looker_oauth_mode_middleware,
+    build_public_mode_middleware,
+    create_server,
+    parse_groups,
+)
 
 logger = structlog.get_logger()
 
@@ -74,6 +79,21 @@ def cli() -> None:
 
 async def run(config: LookerConfig, groups: set[str]) -> None:
     """Start the server with graceful shutdown handling."""
+    # ``public`` and ``looker_oauth`` are HTTP-only auth postures: their
+    # authentication gate is mounted only on the streamable-http transport
+    # (below). Pairing either with stdio would silently start the server with
+    # NO MCP-layer authentication, so fail fast at startup rather than ship
+    # that misconfiguration and surface it as unauthenticated access.
+    if (
+        config.mcp_mode in (LookerMcpMode.PUBLIC, LookerMcpMode.LOOKER_OAUTH)
+        and not config.is_http()
+    ):
+        raise SystemExit(
+            f"LOOKER_MCP_MODE={config.mcp_mode.value} requires "
+            "LOOKER_TRANSPORT=streamable-http — its authentication gate is "
+            "HTTP-only; stdio would run unauthenticated."
+        )
+
     # ── MCP-level auth (optional bearer token) ───────────────────────
     auth: Any = None
     if config.mcp_auth_token:
@@ -103,15 +123,20 @@ async def run(config: LookerConfig, groups: set[str]) -> None:
         kwargs["transport"] = "streamable-http"
         kwargs["host"] = config.host
         kwargs["port"] = config.port
-        # Composition order matters: PublicModeAuthMiddleware (when
+        # Composition order matters: the mode-specific auth gate (when
         # present) runs FIRST so unauthenticated requests are rejected
         # before HeaderCaptureMiddleware copies anything into the
-        # request-scoped ContextVar. In dev mode the returned value is
-        # None and the chain is just [HeaderCaptureMiddleware] as before.
+        # request-scoped ContextVar. ``public`` mode validates a JWKS-backed
+        # JWT; ``looker_oauth`` mode introspects an opaque Looker token via
+        # ``GET /user``. At most one is non-None for a given config. In dev
+        # mode both return None and the chain is just
+        # [HeaderCaptureMiddleware] as before.
         middleware: list[Middleware] = []
-        public_auth = build_public_mode_middleware(config)
-        if public_auth is not None:
-            middleware.append(public_auth)
+        auth_gate = build_public_mode_middleware(config) or build_looker_oauth_mode_middleware(
+            config
+        )
+        if auth_gate is not None:
+            middleware.append(auth_gate)
         middleware.append(Middleware(HeaderCaptureMiddleware))
         kwargs["middleware"] = middleware
     else:
