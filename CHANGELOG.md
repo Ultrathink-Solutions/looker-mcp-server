@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-05-28
+
+Adds a third MCP-level authentication posture, `LOOKER_MCP_MODE=looker_oauth`,
+in which **Looker itself is the authorization server** and the MCP server
+holds **no admin API3 credentials and no sudo capability**. A client runs a
+Looker PKCE flow directly against the Looker instance, obtains an **opaque**
+per-user Looker access token, and presents it as `Authorization: Bearer
+<token>`. The server advertises Looker (the `LOOKER_BASE_URL`) as the
+authorization server in its RFC 9728 Protected Resource Metadata, verifies
+every inbound token by calling Looker's `GET /user` introspection endpoint
+(accept iff Looker returns a valid user; fail-closed otherwise), and forwards
+the verified token to Looker as the session token so the user's own Looker
+permissions govern every call. This sidesteps the `X-User-*` identity envelope
+entirely and requires only `LOOKER_BASE_URL` — no JWKS, issuer, or
+service-account configuration.
+
+### Added
+
+- **`LOOKER_MCP_MODE=looker_oauth` — Looker-as-its-own-authorization-server,
+  opaque-token, no-credential posture.** Selectable by configuration; only
+  `LOOKER_BASE_URL` (an absolute `https://` URL) is required. Concretely:
+  - **Provider selection** — `create_server` selects a no-credential
+    `OAuthIdentityProvider` that reads the bearer straight from the
+    `Authorization` header (stripping the `Bearer` scheme) and forwards it to
+    Looker as an `oauth`-mode session token. No fallback credentials and no
+    `act_as_user` admin-sudo wrapper (this posture has no admin identity to
+    impersonate with), so a tokenless request fails rather than borrowing a
+    shared identity.
+  - **PRM target** — the RFC 9728 Protected Resource Metadata document
+    advertises the Looker base URL as `authorization_servers[0]`, so MCP
+    clients auto-discover Looker's OAuth endpoints and run PKCE there. The
+    `resource` identifier defaults to `LOOKER_BASE_URL` and can be pinned via
+    `LOOKER_MCP_RESOURCE_URI`.
+  - **Opaque-token inbound** — a new ASGI gate
+    (`LookerOAuthAuthMiddleware`, in `oidc/looker_introspection.py`) verifies
+    each request's opaque bearer via Looker `GET /user` introspection
+    (`LookerUserIntrospector`). Accepted iff Looker returns a user; 401
+    `invalid_token` on rejected/expired tokens, non-200 responses, non-JSON
+    bodies, missing user id, or Looker transport failures (fail-closed). The
+    gate mirrors the `public`-mode contract: 400 on URL-query bearers (OAuth
+    2.1 §5.1.1), realm-bearing `WWW-Authenticate` challenges on 401, anonymous
+    `/.well-known/*` + `/healthz` + `/readyz` + `/_introspect`. On success the
+    `Authorization` header is left intact for the downstream identity provider.
+  - **Config posture validation** — a new `model_validator` requires
+    `LOOKER_BASE_URL` (and that it be `https://`), but **not**
+    `LOOKER_MCP_JWKS_URI` / `LOOKER_MCP_ISSUER_URL` / `LOOKER_MCP_RESOURCE_URI`.
+    A static `LOOKER_MCP_AUTH_TOKEN` is rejected at startup (it would defeat
+    the per-user identity). New `PostureErrorKind` values:
+    `looker_oauth_missing_base_url`, `looker_oauth_base_url_not_https`,
+    `looker_oauth_static_bearer_forbidden`.
+
+  Note: the `looker_oauth` route is mounted only on `streamable-http`
+  transport, consistent with the `public`-mode auth gate; `stdio` deployments
+  are unaffected.
+
 ## [0.19.0] - 2026-05-24
 
 Two changes targeting deployments where this server sits behind a

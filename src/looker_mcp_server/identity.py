@@ -306,7 +306,22 @@ class OAuthIdentityProvider:
     cannot be impersonated via sudo.  A gateway or MCP OAuth flow supplies
     the token.
 
-    Falls back to API-key mode when no token header is present.
+    Two carriage shapes are supported, selected by ``strip_bearer_scheme``:
+
+    - **Bare token** (default) — the header value IS the token. This is the
+      ``X-User-Token`` shape a gateway uses after exchanging the user's
+      identity for a Looker token out-of-band.
+    - **``Authorization: Bearer <token>``** (``strip_bearer_scheme=True``) —
+      the header carries the standard ``Bearer`` scheme prefix, which is
+      stripped before use. This is the ``LOOKER_MCP_MODE=looker_oauth``
+      shape, where the client presents its opaque Looker access token
+      directly in the ``Authorization`` header (no gateway exchange).
+
+    When ``fallback_client_id`` / ``fallback_client_secret`` are configured
+    and no token is present, the provider falls back to API-key mode.
+    Otherwise a missing token raises ``PermissionError`` — the no-credential
+    ``looker_oauth`` posture deliberately omits the fallback so an
+    unauthenticated request can never silently borrow a shared identity.
     """
 
     def __init__(
@@ -314,13 +329,22 @@ class OAuthIdentityProvider:
         token_header: str = "X-User-Token",
         fallback_client_id: str | None = None,
         fallback_client_secret: str | None = None,
+        *,
+        strip_bearer_scheme: bool = False,
     ) -> None:
         self._header = token_header.lower()
         self._fallback_id = fallback_client_id
         self._fallback_secret = fallback_client_secret
+        self._strip_bearer_scheme = strip_bearer_scheme
 
     async def resolve(self, context: RequestContext) -> LookerIdentity:
         token = context.headers.get(self._header)
+        if token and self._strip_bearer_scheme:
+            scheme, _, rest = token.partition(" ")
+            # Only strip when the prefix is actually the Bearer scheme;
+            # a bare opaque token without a space passes through unchanged.
+            if scheme.lower() == "bearer":
+                token = rest.strip()
         if token:
             return LookerIdentity(mode="oauth", access_token=token)
 
