@@ -18,6 +18,7 @@ class LookerMcpMode(StrEnum):
 
     DEV = "dev"
     PUBLIC = "public"
+    LOOKER_OAUTH = "looker_oauth"
 
 
 class PostureErrorKind(StrEnum):
@@ -33,6 +34,11 @@ class PostureErrorKind(StrEnum):
     PUBLIC_RESOURCE_URI_NOT_HTTPS = "public_resource_uri_not_https"
     PUBLIC_RESOURCE_URI_MALFORMED = "public_resource_uri_malformed"
     PUBLIC_STATIC_BEARER_FORBIDDEN = "public_static_bearer_forbidden"
+    LOOKER_OAUTH_MISSING_BASE_URL = "looker_oauth_missing_base_url"
+    LOOKER_OAUTH_BASE_URL_NOT_HTTPS = "looker_oauth_base_url_not_https"
+    LOOKER_OAUTH_BASE_URL_INVALID = "looker_oauth_base_url_invalid"
+    LOOKER_OAUTH_MISSING_RESOURCE_URI = "looker_oauth_missing_resource_uri"
+    LOOKER_OAUTH_STATIC_BEARER_FORBIDDEN = "looker_oauth_static_bearer_forbidden"
 
 
 def _is_absolute_https_url(value: str) -> bool:
@@ -192,6 +198,22 @@ class LookerConfig(BaseSettings):
       authorization requirements — OAuth 2.1 resource server with RS256/ES256
       JWKS-based token validation. Static-bearer mode is rejected at
       startup; RFC 9068 §2.1 forbids symmetric signing for access tokens.
+    - ``looker_oauth``: Looker-as-its-own-authorization-server posture. The
+      MCP server holds NO admin API3 credentials and NO sudo capability. A
+      client runs a Looker PKCE flow directly against the Looker instance,
+      obtains an **opaque** per-user Looker access token, and presents it as
+      ``Authorization: Bearer <opaque-token>``. The server advertises Looker
+      (not a separate JWKS-backed OIDC issuer) as the authorization server in
+      its RFC 9728 Protected Resource Metadata, and verifies every inbound
+      token by calling Looker's ``GET /user`` introspection endpoint —
+      accepting iff Looker returns a valid user. The verified token is then
+      forwarded as the Looker session token, so the user's own Looker
+      permissions govern every API call. This sidesteps the ``X-User-*``
+      identity envelope and the JWKS/issuer machinery entirely; it requires
+      ``LOOKER_BASE_URL`` plus ``LOOKER_MCP_RESOURCE_URI`` (this MCP server's
+      own public URI — the PRM ``resource`` and the ``resource_metadata``
+      host; it has no default and must not point at Looker's host). Static-
+      bearer mode is rejected at startup (it would bypass per-user identity).
     """
 
     mcp_auth_token: str = ""
@@ -379,6 +401,102 @@ class LookerConfig(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_looker_oauth_mode_posture(self) -> Self:
+        """Enforce the invariants of the Looker-as-authorization-server posture.
+
+        Only runs in :attr:`LookerMcpMode.LOOKER_OAUTH`. Unlike ``public``
+        mode, this posture does NOT require ``mcp_jwks_uri`` / ``mcp_issuer_url``
+        — Looker itself is the authorization server and the inbound token is an
+        opaque Looker access token verified via ``GET /user`` introspection, not
+        a JWKS-validated JWT. It DOES require ``mcp_resource_uri`` in addition to
+        ``LOOKER_BASE_URL``: the resource URI is this MCP server's own canonical
+        URI (the RFC 9728 ``resource`` and the host of the ``resource_metadata``
+        challenge URL) and cannot default to Looker's host, since the MCP
+        server — not Looker — serves the PRM. ``LOOKER_BASE_URL`` is the Looker
+        introspection target and the OAuth-endpoint base advertised in the PRM.
+        Static-bearer mode is forbidden because it would bypass the per-user
+        identity the whole posture exists to enforce.
+        """
+        if self.mcp_mode != LookerMcpMode.LOOKER_OAUTH:
+            return self
+
+        # A static bearer is a single shared credential with no per-user
+        # identity — the antithesis of this posture, where every request
+        # carries the calling user's own opaque Looker token. Fail closed.
+        if self.mcp_auth_token:
+            raise DeploymentPostureError(
+                PostureErrorKind.LOOKER_OAUTH_STATIC_BEARER_FORBIDDEN,
+                "LOOKER_MCP_AUTH_TOKEN is set but LOOKER_MCP_MODE=looker_oauth "
+                "forbids a shared static bearer: this posture authenticates "
+                "each request by its per-user opaque Looker token. Unset "
+                "LOOKER_MCP_AUTH_TOKEN, or switch to LOOKER_MCP_MODE=dev.",
+            )
+
+        # ``base_url`` is normalized by ``_strip_trailing_slash`` already, so
+        # the stored attribute IS the canonical value we validate against.
+        if not self.base_url:
+            raise DeploymentPostureError(
+                PostureErrorKind.LOOKER_OAUTH_MISSING_BASE_URL,
+                "LOOKER_MCP_MODE=looker_oauth requires LOOKER_BASE_URL — the "
+                "Looker instance is both the token-introspection target "
+                "(GET /user) and the authorization server advertised in the "
+                "RFC 9728 Protected Resource Metadata.",
+            )
+        if not _is_absolute_https_url(self.base_url):
+            raise DeploymentPostureError(
+                PostureErrorKind.LOOKER_OAUTH_BASE_URL_NOT_HTTPS,
+                f"LOOKER_BASE_URL={self.base_url!r} must be an absolute https "
+                "URL in looker_oauth mode — opaque access tokens travel over "
+                "this connection and MUST NOT cross a plaintext hop.",
+            )
+        base_parsed = urlparse(self.base_url)
+        if base_parsed.query or base_parsed.fragment:
+            raise DeploymentPostureError(
+                PostureErrorKind.LOOKER_OAUTH_BASE_URL_INVALID,
+                f"LOOKER_BASE_URL={self.base_url!r} must be an https origin "
+                "without query or fragment components — it is joined with "
+                "'/api/<ver>/user' for token introspection, which a query or "
+                "fragment would corrupt.",
+            )
+
+        # The MCP server's OWN canonical URI: the RFC 9728 ``resource`` and the
+        # host of the ``resource_metadata`` PRM URL advertised in 401
+        # challenges. REQUIRED in looker_oauth mode — the server cannot derive
+        # its own public URL, and defaulting to the Looker base URL would point
+        # clients at Looker's host for PRM discovery (the MCP server, not
+        # Looker, serves the PRM). Must be RFC 9728-safe when set.
+        if not self.mcp_resource_uri:
+            raise DeploymentPostureError(
+                PostureErrorKind.LOOKER_OAUTH_MISSING_RESOURCE_URI,
+                "LOOKER_MCP_MODE=looker_oauth requires LOOKER_MCP_RESOURCE_URI "
+                "— this MCP server's own public https URI. It is the RFC 9728 "
+                "`resource` identifier and the host of the `resource_metadata` "
+                "PRM URL clients fetch; it cannot default to LOOKER_BASE_URL "
+                "(that would direct clients to Looker's host for the PRM).",
+            )
+        parsed = urlparse(self.mcp_resource_uri)
+        if not parsed.scheme or not parsed.netloc:
+            raise DeploymentPostureError(
+                PostureErrorKind.PUBLIC_RESOURCE_URI_MALFORMED,
+                f"LOOKER_MCP_RESOURCE_URI={self.mcp_resource_uri!r} is not a valid absolute URI.",
+            )
+        if parsed.fragment:
+            raise DeploymentPostureError(
+                PostureErrorKind.PUBLIC_RESOURCE_URI_MALFORMED,
+                f"LOOKER_MCP_RESOURCE_URI={self.mcp_resource_uri!r} has a "
+                "fragment component; RFC 9728 §3 forbids fragments in the "
+                "resource identifier.",
+            )
+        if parsed.scheme != "https":
+            raise DeploymentPostureError(
+                PostureErrorKind.PUBLIC_RESOURCE_URI_NOT_HTTPS,
+                f"LOOKER_MCP_RESOURCE_URI={self.mcp_resource_uri!r} must use "
+                "the https scheme in looker_oauth mode — opaque tokens MUST "
+                "NOT cross a plaintext hop.",
+            )
+        return self
+
     def is_http(self) -> bool:
         return self.transport == "streamable-http"
 
@@ -386,3 +504,17 @@ class LookerConfig(BaseSettings):
     def api_url(self) -> str:
         """Full base URL for API requests (e.g. ``https://co.looker.com/api/4.0``)."""
         return f"{self.base_url}/api/{self.api_version}"
+
+    @property
+    def looker_oauth_resource_uri(self) -> str:
+        """This MCP server's canonical URI, advertised in the ``looker_oauth``
+        PRM as the RFC 9728 ``resource`` and used as the host of the
+        ``resource_metadata`` URL in 401 challenges.
+
+        Required via ``LOOKER_MCP_RESOURCE_URI`` (validated at startup) — it
+        must be the MCP server's OWN public URI, not Looker's: the MCP server
+        serves the PRM, so the challenge's ``resource_metadata`` URL must
+        resolve back to this server. Looker is advertised separately as the
+        authorization server.
+        """
+        return self.mcp_resource_uri
