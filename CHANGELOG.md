@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`reset_git_branch_to_remote` — force-push recovery primitive for
+  per-user dev workspaces.** Wraps `POST /projects/{id}/reset_to_remote`
+  (fetch + hard reset of the current dev branch to its remote HEAD) in a
+  dev-mode session. This is the only operation that recovers a dev
+  workspace after a force-push has rewritten branch history: the IDE's
+  "Pull Remote Changes" merges the stale local commit with the new remote
+  and mass-conflicts, `reset_to_production` resets to the wrong base, and
+  `switch_git_branch` checks out the cached local ref without fetching.
+  Requires `confirm=True` (the target user's uncommitted IDE edits are
+  discarded) and returns before/after `{name, ref, remote_ref}` for
+  verification. Combine with `act_as_user` to repair another developer's
+  clone — Looker dev workspaces are per-user, so resetting one user's
+  clone does nothing for any other user's.
+- **`update_git_branch` — hard-pin a branch to a specific ref.** Wraps
+  `PUT /projects/{id}/git_branch` with `{name, ref}`; the deterministic
+  primitive for CI sync (pin a dev workspace to the exact SHA of a push
+  event). Carries the same `confirm=True` guard since the target user's
+  local branch position is discarded.
+
 ### Changed
 
 - **Discovery tools now exclude LookML `hidden` content by default, with a

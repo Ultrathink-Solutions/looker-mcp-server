@@ -292,6 +292,131 @@ def register_git_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("reset_to_production", e)
 
+    @server.tool(
+        description=(
+            "Hard-reset the current dev branch to its remote HEAD (fetch + "
+            "reset). This is the recovery primitive after a force-push has "
+            "rewritten the branch's history: the IDE's 'Pull Remote Changes' "
+            "merges and conflicts, while this discards the local ref and "
+            "uncommitted edits and makes the dev workspace match origin. "
+            "Operates on the calling user's per-user dev workspace — pass "
+            "act_as_user to repair another developer's clone. Requires "
+            "confirm=True because uncommitted IDE edits are lost. Returns "
+            "before/after branch state for verification."
+        ),
+    )
+    async def reset_git_branch_to_remote(
+        project_id: Annotated[str, "LookML project ID"],
+        confirm: Annotated[
+            bool, "Must be True; prevents accidental data loss from stale tool calls"
+        ] = False,
+        act_as_user: ActAsUser = None,
+    ) -> str:
+        if not confirm:
+            return json.dumps(
+                {
+                    "error": "Confirmation required.",
+                    "hint": (
+                        "This operation discards the target user's local ref "
+                        "and uncommitted dev-workspace edits on the currently "
+                        "checked-out branch, resetting it to the remote HEAD. "
+                        "Re-issue with confirm=True to proceed."
+                    ),
+                },
+                indent=2,
+            )
+
+        ctx = client.build_context(
+            "reset_git_branch_to_remote",
+            "git",
+            {"project_id": project_id, "act_as_user": act_as_user},
+        )
+
+        def _branch_state(branch: Any) -> dict[str, Any]:
+            return {
+                "name": branch.get("name"),
+                "ref": branch.get("ref"),
+                "remote_ref": branch.get("remote_ref"),
+            }
+
+        try:
+            async with client.session(ctx, dev_mode=True) as session:
+                before = await session.get(f"/projects/{_path_seg(project_id)}/git_branch")
+                await session.post(f"/projects/{_path_seg(project_id)}/reset_to_remote")
+                after = await session.get(f"/projects/{_path_seg(project_id)}/git_branch")
+                return json.dumps(
+                    {
+                        "reset": True,
+                        "project_id": project_id,
+                        "before": _branch_state(before),
+                        "after": _branch_state(after),
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("reset_git_branch_to_remote", e)
+
+    @server.tool(
+        description=(
+            "Update a Git branch in a LookML project to point at a specific "
+            "ref (branch name + commit SHA or ref). This is a hard pin — the "
+            "deterministic-sync primitive for CI (e.g. pin the dev workspace "
+            "to the exact SHA of a push event) and for repairing a branch "
+            "whose local ref has diverged from where it should be. Operates "
+            "on the calling user's per-user dev workspace — pass act_as_user "
+            "to target another developer's clone. Requires confirm=True "
+            "because the target user's local branch position (and any "
+            "commits not reachable from the new ref) is discarded."
+        ),
+    )
+    async def update_git_branch(
+        project_id: Annotated[str, "LookML project ID"],
+        branch_name: Annotated[str, "Name of the branch to update"],
+        ref: Annotated[str, "Git ref or commit SHA to point the branch at"],
+        confirm: Annotated[
+            bool, "Must be True; prevents accidental data loss from stale tool calls"
+        ] = False,
+        act_as_user: ActAsUser = None,
+    ) -> str:
+        if not confirm:
+            return json.dumps(
+                {
+                    "error": "Confirmation required.",
+                    "hint": (
+                        "This operation hard-pins the branch to the given ref, "
+                        "discarding the target user's current local branch "
+                        "position. Re-issue with confirm=True to proceed."
+                    ),
+                },
+                indent=2,
+            )
+
+        ctx = client.build_context(
+            "update_git_branch",
+            "git",
+            {
+                "project_id": project_id,
+                "branch_name": branch_name,
+                "act_as_user": act_as_user,
+            },
+        )
+        try:
+            async with client.session(ctx, dev_mode=True) as session:
+                branch = await session.put(
+                    f"/projects/{_path_seg(project_id)}/git_branch",
+                    body={"name": branch_name, "ref": ref},
+                )
+                return json.dumps(
+                    {
+                        "name": branch.get("name") if branch else branch_name,
+                        "ref": branch.get("ref") if branch else ref,
+                        "remote_ref": branch.get("remote_ref") if branch else None,
+                    },
+                    indent=2,
+                )
+        except Exception as e:
+            return format_api_error("update_git_branch", e)
+
     # ── Deploy keys ──────────────────────────────────────────────────
 
     @server.tool(
