@@ -517,3 +517,54 @@ class TestRunDashboardSharesRunQueryPath:
             "run_dashboard must route its per-tile run through the shared "
             "saved-query helper that backs run_query."
         )
+
+
+class TestSearchContentHiddenFiltering:
+    """``search_content`` drops results carrying a truthy ``hidden`` flag by
+    default; ``include_hidden=True`` passes the raw result set through.
+    Items with no ``hidden`` key are always kept (most content types do not
+    carry the flag)."""
+
+    SEARCH_PAYLOAD = [
+        {"name": "Sales Dashboard", "type": "dashboard"},
+        {"name": "Staging Explore", "type": "explore", "hidden": True},
+        {"name": "Orders Explore", "type": "explore", "hidden": False},
+    ]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_hidden_results_excluded_by_default(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/content_metadata_access").mock(
+            return_value=httpx.Response(200, json=self.SEARCH_PAYLOAD)
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("search_content", {"query_string": "orders"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert [r["name"] for r in payload] == ["Sales Dashboard", "Orders Explore"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_include_hidden_returns_all(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/content_metadata_access").mock(
+            return_value=httpx.Response(200, json=self.SEARCH_PAYLOAD)
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "search_content", {"query_string": "orders", "include_hidden": True}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert len(payload) == 3

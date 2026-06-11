@@ -52,6 +52,28 @@ ACT_AS_USER_DESCRIPTION = (
 ActAsUser = Annotated[str | None, ACT_AS_USER_DESCRIPTION]
 
 
+# Per-call hidden-content toggle shared across discovery tools (explore,
+# query). LookML ``hidden: yes`` is a curation signal — model authors hide
+# fields and explores they don't want surfaced in the field picker — so
+# discovery tools honor it by default and expose this escape hatch.
+INCLUDE_HIDDEN_DESCRIPTION = (
+    "Include items marked hidden in LookML (hidden explores, fields, or "
+    "content). Hidden items are excluded by default."
+)
+IncludeHidden = Annotated[bool, INCLUDE_HIDDEN_DESCRIPTION]
+
+
+def _filter_hidden(items: list[dict[str, Any]], include_hidden: bool) -> list[dict[str, Any]]:
+    """Drop items whose ``hidden`` flag is truthy unless ``include_hidden``.
+
+    Items without a ``hidden`` key are always kept — not every Looker
+    payload carries the flag, and absence means "not hidden".
+    """
+    if include_hidden:
+        return items
+    return [item for item in items if not item.get("hidden")]
+
+
 def _validate_branch_args(branch: str | None, project_id: str | None) -> None:
     """Branch swap requires a non-empty project ID and branch name.
 
