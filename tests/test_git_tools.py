@@ -90,6 +90,8 @@ EXPECTED_GIT_TOOLS = {
     "delete_git_branch",
     "deploy_to_production",
     "reset_to_production",
+    "reset_git_branch_to_remote",
+    "update_git_branch",
     "get_git_deploy_key",
     "create_git_deploy_key",
     "list_git_connection_tests",
@@ -670,3 +672,148 @@ class TestProjectIdPathEncoding:
             assert "my%20project" in captured["raw_path"]
         finally:
             await looker_client.close()
+
+
+class TestResetGitBranchToRemote:
+    """``reset_git_branch_to_remote`` is the force-push recovery primitive:
+    hard-reset the current dev branch to its remote HEAD (fetch + reset).
+    It discards the target user's uncommitted IDE edits, so it requires
+    ``confirm=True`` and reports before/after branch state for verification."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_unconfirmed_returns_refusal_without_api_calls(self, config):
+        _mock_login_logout()
+        reset_route = respx.post(f"{API_URL}/projects/proj1/reset_to_remote").mock(
+            return_value=httpx.Response(204)
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp, "reset_git_branch_to_remote", {"project_id": "proj1"}
+            )()
+            assert "error" in payload
+            assert not reset_route.called, "refusal must short-circuit before any API call"
+            assert not respx.calls, (
+                "refusal must short-circuit before ANY API traffic — "
+                "including login and the dev-mode session PATCH"
+            )
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_confirmed_resets_and_returns_before_after(self, config):
+        _mock_login_logout()
+        stale = {"name": "feature-x", "ref": "a592f91", "remote_ref": "f60eb12"}
+        fresh = {"name": "feature-x", "ref": "f60eb12", "remote_ref": "f60eb12"}
+        branch_route = respx.get(f"{API_URL}/projects/proj1/git_branch").mock(
+            side_effect=[httpx.Response(200, json=stale), httpx.Response(200, json=fresh)]
+        )
+        reset_route = respx.post(f"{API_URL}/projects/proj1/reset_to_remote").mock(
+            return_value=httpx.Response(204)
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "reset_git_branch_to_remote",
+                {"project_id": "proj1", "confirm": True},
+            )()
+        finally:
+            await looker_client.close()
+
+        assert reset_route.called
+        assert branch_route.call_count == 2, "must capture branch state before AND after"
+        assert payload["reset"] is True
+        assert payload["before"] == {
+            "name": "feature-x",
+            "ref": "a592f91",
+            "remote_ref": "f60eb12",
+        }
+        assert payload["after"] == {
+            "name": "feature-x",
+            "ref": "f60eb12",
+            "remote_ref": "f60eb12",
+        }
+
+        # The reset must run in the dev workspace — without the session
+        # PATCH it would target production and 422.
+        patched = [
+            c
+            for c in respx.calls
+            if c.request.method == "PATCH" and "/session" in str(c.request.url)
+        ]
+        assert patched, "reset_git_branch_to_remote must switch the session to dev mode"
+
+
+class TestUpdateGitBranch:
+    """``update_git_branch`` pins a branch to a specific ref via
+    ``PUT /projects/{id}/git_branch`` with ``{name, ref}`` — the
+    deterministic-sync primitive (e.g. CI pinning to an event SHA).
+    Equally destructive to the target user's local branch position, so it
+    carries the same ``confirm=True`` guard."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_unconfirmed_returns_refusal_without_api_calls(self, config):
+        _mock_login_logout()
+        put_route = respx.put(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(200, json={"name": "feature-x", "ref": "f60eb12"})
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "update_git_branch",
+                {"project_id": "proj1", "branch_name": "feature-x", "ref": "f60eb12"},
+            )()
+            assert "error" in payload
+            assert not put_route.called, "refusal must short-circuit before any API call"
+            assert not respx.calls, (
+                "refusal must short-circuit before ANY API traffic — "
+                "including login and the dev-mode session PATCH"
+            )
+        finally:
+            await looker_client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_confirmed_puts_name_and_ref(self, config):
+        _mock_login_logout()
+        put_route = respx.put(f"{API_URL}/projects/proj1/git_branch").mock(
+            return_value=httpx.Response(
+                200, json={"name": "feature-x", "ref": "f60eb12", "remote_ref": "f60eb12"}
+            )
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"git"})
+        try:
+            payload = await _invoke_tool(
+                mcp,
+                "update_git_branch",
+                {
+                    "project_id": "proj1",
+                    "branch_name": "feature-x",
+                    "ref": "f60eb12",
+                    "confirm": True,
+                },
+            )()
+        finally:
+            await looker_client.close()
+
+        assert put_route.called
+        body = json.loads(put_route.calls[0].request.content.decode())
+        assert body == {"name": "feature-x", "ref": "f60eb12"}
+        assert payload["name"] == "feature-x"
+        assert payload["ref"] == "f60eb12"
+
+        # The pin must run in the dev workspace — without the session PATCH
+        # it would target production and 422.
+        session_patches = [
+            c
+            for c in respx.calls
+            if c.request.method == "PATCH" and "/session" in str(c.request.url)
+        ]
+        assert session_patches, "update_git_branch must switch the session to dev mode"
+        patch_body = json.loads(session_patches[0].request.content.decode())
+        assert patch_body == {"workspace_id": "dev"}
