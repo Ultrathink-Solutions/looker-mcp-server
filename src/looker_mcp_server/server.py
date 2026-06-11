@@ -184,18 +184,13 @@ def create_server(
     # guidance. ``stdio`` transport doesn't need this route (no gateway,
     # no discovery flow).
     if config.is_http():
-        from importlib import metadata
-
+        from . import __version__
         from .introspect import register_introspect_endpoint
 
-        try:
-            pkg_version = metadata.version("looker-mcp-server")
-        except metadata.PackageNotFoundError:
-            pkg_version = "0.0.0"
         register_introspect_endpoint(
             mcp,
             server_name="looker-mcp-server",
-            server_version=pkg_version,
+            server_version=__version__,
         )
 
     # ── Register tool groups ─────────────────────────────────────────
