@@ -12,7 +12,13 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 
 from ..client import LookerClient, LookerSession, format_api_error
-from ._helpers import ActAsUser, _maybe_use_branch, _validate_branch_args
+from ._helpers import (
+    ActAsUser,
+    IncludeHidden,
+    _filter_hidden,
+    _maybe_use_branch,
+    _validate_branch_args,
+)
 
 # Looker returns these formats as ``text/plain`` rather than JSON; calling
 # ``session.get`` on them would raise ``Expecting value`` from the JSON
@@ -477,7 +483,8 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "Search across all Looker content — dashboards, looks, explores, "
-            "and more. Returns matching items with titles, descriptions, and IDs."
+            "and more. Returns matching items with titles, descriptions, and IDs. "
+            "Hidden items are excluded unless include_hidden=true."
         ),
     )
     async def search_content(
@@ -487,6 +494,7 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             "Content types to search: 'dashboard', 'look', 'folder', etc.",
         ] = None,
         limit: Annotated[int, "Maximum results to return"] = 20,
+        include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context("search_content", "query", {"query_string": query_string})
         try:
@@ -495,6 +503,8 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                 if types:
                     params["types"] = ",".join(types)
                 results = await session.get("/content_metadata_access", params=params)
+                if isinstance(results, list):
+                    results = _filter_hidden(results, include_hidden)
                 return json.dumps(results, indent=2)
         except Exception as e:
             return format_api_error("search_content", e)

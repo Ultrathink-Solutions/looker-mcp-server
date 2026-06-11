@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Discovery tools now exclude LookML `hidden` content by default, with a
+  per-call `include_hidden` escape hatch.** `list_models`, `get_model`,
+  `get_explore`, `list_dimensions`, `list_measures`, and `search_content`
+  all gain an `include_hidden: bool = false` argument. By default, hidden
+  explores are filtered out of `list_models`/`get_model` (previously they
+  leaked through), hidden filter and parameter fields are filtered out of
+  `get_explore` (previously only dimensions and measures were filtered), and
+  `search_content` drops results carrying a truthy `hidden` flag. Passing
+  `include_hidden=true` returns everything, with each item's `hidden` flag
+  visible (`list_models` now surfaces the flag per explore). LookML `hidden`
+  is a curation signal, not a security boundary — the API serves hidden items
+  to any caller regardless; this only aligns the MCP discovery surface with
+  the model author's curation.
+
 ## [0.20.0] - 2026-05-28
 
 Adds a third MCP-level authentication posture, `LOOKER_MCP_MODE=looker_oauth`,

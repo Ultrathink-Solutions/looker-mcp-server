@@ -13,16 +13,18 @@ from typing import Annotated
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+from ._helpers import IncludeHidden, _filter_hidden
 
 
 def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "List all LookML models accessible to the current user. "
-            "Returns model names, labels, associated projects, and their explores."
+            "Returns model names, labels, associated projects, and their explores. "
+            "Hidden explores are excluded unless include_hidden=true."
         ),
     )
-    async def list_models() -> str:
+    async def list_models(include_hidden: IncludeHidden = False) -> str:
         ctx = client.build_context("list_models", "explore")
         try:
             async with client.session(ctx) as session:
@@ -34,8 +36,12 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                         "project_name": m.get("project_name"),
                         "has_content": m.get("has_content"),
                         "explores": [
-                            {"name": e.get("name"), "label": e.get("label")}
-                            for e in (m.get("explores") or [])
+                            {
+                                "name": e.get("name"),
+                                "label": e.get("label"),
+                                "hidden": e.get("hidden"),
+                            }
+                            for e in _filter_hidden(m.get("explores") or [], include_hidden)
                         ],
                     }
                     for m in (models or [])
@@ -47,11 +53,13 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "Get detailed information about a specific LookML model, "
-            "including all its explores and their descriptions."
+            "including all its explores and their descriptions. "
+            "Hidden explores are excluded unless include_hidden=true."
         ),
     )
     async def get_model(
         model_name: Annotated[str, "Name of the LookML model"],
+        include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context("get_model", "explore", {"model_name": model_name})
         try:
@@ -69,7 +77,7 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                             "group_label": e.get("group_label"),
                             "hidden": e.get("hidden"),
                         }
-                        for e in (model.get("explores") or [])
+                        for e in _filter_hidden(model.get("explores") or [], include_hidden)
                     ],
                 }
                 return json.dumps(result, indent=2)
@@ -80,12 +88,14 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
         description=(
             "Get full details of an explore including all its dimensions, measures, "
             "filters, and parameters. This is the primary tool for understanding "
-            "what fields are available for querying."
+            "what fields are available for querying. "
+            "Hidden fields are excluded unless include_hidden=true."
         ),
     )
     async def get_explore(
         model_name: Annotated[str, "Name of the LookML model"],
         explore_name: Annotated[str, "Name of the explore within the model"],
+        include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context(
             "get_explore", "explore", {"model_name": model_name, "explore_name": explore_name}
@@ -106,8 +116,9 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                             "sql": d.get("sql"),
                             "hidden": d.get("hidden"),
                         }
-                        for d in (explore.get("fields", {}).get("dimensions") or [])
-                        if not d.get("hidden")
+                        for d in _filter_hidden(
+                            explore.get("fields", {}).get("dimensions") or [], include_hidden
+                        )
                     ],
                     "measures": [
                         {
@@ -118,8 +129,9 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                             "sql": m.get("sql"),
                             "hidden": m.get("hidden"),
                         }
-                        for m in (explore.get("fields", {}).get("measures") or [])
-                        if not m.get("hidden")
+                        for m in _filter_hidden(
+                            explore.get("fields", {}).get("measures") or [], include_hidden
+                        )
                     ],
                     "filters": [
                         {
@@ -127,8 +139,11 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                             "label": f.get("label"),
                             "type": f.get("type"),
                             "description": f.get("description"),
+                            "hidden": f.get("hidden"),
                         }
-                        for f in (explore.get("fields", {}).get("filters") or [])
+                        for f in _filter_hidden(
+                            explore.get("fields", {}).get("filters") or [], include_hidden
+                        )
                     ],
                     "parameters": [
                         {
@@ -136,8 +151,11 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                             "label": p.get("label"),
                             "type": p.get("type"),
                             "description": p.get("description"),
+                            "hidden": p.get("hidden"),
                         }
-                        for p in (explore.get("fields", {}).get("parameters") or [])
+                        for p in _filter_hidden(
+                            explore.get("fields", {}).get("parameters") or [], include_hidden
+                        )
                     ],
                 }
                 return json.dumps(result, indent=2)
@@ -147,12 +165,14 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "List dimensions in an explore. Convenience tool that returns "
-            "only the dimension fields (name, label, type, description)."
+            "only the dimension fields (name, label, type, description, hidden). "
+            "Hidden dimensions are excluded unless include_hidden=true."
         ),
     )
     async def list_dimensions(
         model_name: Annotated[str, "Name of the LookML model"],
         explore_name: Annotated[str, "Name of the explore"],
+        include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context(
             "list_dimensions", "explore", {"model_name": model_name, "explore_name": explore_name}
@@ -169,9 +189,11 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                         "label": d.get("label"),
                         "type": d.get("type"),
                         "description": d.get("description"),
+                        "hidden": d.get("hidden"),
                     }
-                    for d in (explore.get("fields", {}).get("dimensions") or [])
-                    if not d.get("hidden")
+                    for d in _filter_hidden(
+                        explore.get("fields", {}).get("dimensions") or [], include_hidden
+                    )
                 ]
                 return json.dumps(dims, indent=2)
         except Exception as e:
@@ -180,12 +202,14 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
             "List measures in an explore. Convenience tool that returns "
-            "only the measure fields (name, label, type, description)."
+            "only the measure fields (name, label, type, description, hidden). "
+            "Hidden measures are excluded unless include_hidden=true."
         ),
     )
     async def list_measures(
         model_name: Annotated[str, "Name of the LookML model"],
         explore_name: Annotated[str, "Name of the explore"],
+        include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context(
             "list_measures", "explore", {"model_name": model_name, "explore_name": explore_name}
@@ -202,9 +226,11 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                         "label": m.get("label"),
                         "type": m.get("type"),
                         "description": m.get("description"),
+                        "hidden": m.get("hidden"),
                     }
-                    for m in (explore.get("fields", {}).get("measures") or [])
-                    if not m.get("hidden")
+                    for m in _filter_hidden(
+                        explore.get("fields", {}).get("measures") or [], include_hidden
+                    )
                 ]
                 return json.dumps(measures, indent=2)
         except Exception as e:
