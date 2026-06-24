@@ -27,6 +27,25 @@ from ._helpers import (
 _TEXT_PLAIN_FORMATS = frozenset({"csv", "txt", "sql"})
 
 
+async def _run_path(
+    session: LookerSession,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    result_format: str = "json",
+) -> Any:
+    """Execute a Looker ``/run`` request, routing text/plain formats correctly.
+
+    Looker returns ``text/plain`` for the ``_TEXT_PLAIN_FORMATS`` (csv, txt,
+    sql); calling ``session.get`` on those routes through ``response.json()``
+    and raises ``Expecting value``. JSON formats go through ``session.get``.
+    Single source of truth for every ``/run`` caller so the routing can't drift.
+    """
+    if result_format in _TEXT_PLAIN_FORMATS:
+        return await session.get_text(path, params=params)
+    return await session.get(path, params=params)
+
+
 async def _execute_saved_query(
     session: LookerSession,
     query_id: str,
@@ -61,11 +80,28 @@ async def _execute_saved_query(
         if value is not None:
             params[key] = "true" if value else "false"
 
-    path = f"/queries/{query_id}/run/{result_format}"
-    request_params = params or None
-    if result_format in _TEXT_PLAIN_FORMATS:
-        return await session.get_text(path, params=request_params)
-    return await session.get(path, params=request_params)
+    return await _run_path(
+        session,
+        f"/queries/{query_id}/run/{result_format}",
+        params=params or None,
+        result_format=result_format,
+    )
+
+
+def _run_payload(result: Any, result_format: str = "json") -> dict[str, Any]:
+    """Build the data portion of a run response from a ``/run`` result.
+
+    Shared by every run tool so the data envelope can't drift: JSON list
+    results carry a ``row_count``; text/plain results (csv, txt) carry the
+    ``format`` they were requested in; ``json_detail`` dicts pass straight
+    through under ``data``. The metadata block (``query`` / ``look``) is merged
+    in by each tool on top of this.
+    """
+    if isinstance(result, list):
+        return {"row_count": len(result), "data": result}
+    if isinstance(result, str):
+        return {"format": result_format, "data": result}
+    return {"data": result}
 
 
 def register_query_tools(server: FastMCP, client: LookerClient) -> None:
@@ -146,13 +182,18 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                     query_def = await session.post("/queries", body=body)
                     query_id = query_def["id"]
 
-                    result = await session.get(f"/queries/{query_id}/run/{result_format}")
-                    if isinstance(result, list):
-                        return json.dumps(
-                            {"row_count": len(result), "data": result},
-                            indent=2,
-                        )
-                    return json.dumps(result, indent=2)
+                    result = await _run_path(
+                        session,
+                        f"/queries/{query_id}/run/{result_format}",
+                        result_format=result_format,
+                    )
+                    # ``query_def`` is the full Query object Looker returns from
+                    # POST /queries — it carries share_url / expanded_share_url /
+                    # url (the explore link). Surface it instead of dropping it.
+                    return json.dumps(
+                        {"query": query_def, **_run_payload(result, result_format)},
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("query", e)
 
@@ -217,7 +258,9 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                     # ``Expecting value: line 1 column 1 (char 0)``. Mirrors the
                     # pattern used by the git deploy-key tools.
                     result = await session.get_text(f"/queries/{query_id}/run/sql")
-                    return json.dumps({"sql": result}, indent=2)
+                    # Surface the Query object (explore link + slug) alongside
+                    # the compiled SQL rather than dropping it.
+                    return json.dumps({"query": query_def, "sql": result}, indent=2)
         except Exception as e:
             return format_api_error("query_sql", e)
 
@@ -262,16 +305,20 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             effective_dev_mode = dev_mode or branch is not None
             async with client.session(ctx, dev_mode=effective_dev_mode) as session:
                 async with _maybe_use_branch(session, project_id, branch):
-                    result = await session.get(
+                    # The /run endpoint returns only rows; fetch the Look object
+                    # for its metadata (short_url / public_url + the embedded
+                    # Query's explore link).
+                    look_def = await session.get(f"/looks/{look_id}")
+                    result = await _run_path(
+                        session,
                         f"/looks/{look_id}/run/{result_format}",
                         params={"limit": limit},
+                        result_format=result_format,
                     )
-                    if isinstance(result, list):
-                        return json.dumps(
-                            {"row_count": len(result), "data": result},
-                            indent=2,
-                        )
-                    return json.dumps(result, indent=2)
+                    return json.dumps(
+                        {"look": look_def, **_run_payload(result, result_format)},
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("run_look", e)
 
@@ -349,6 +396,10 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             effective_dev_mode = dev_mode or branch is not None
             async with client.session(ctx, dev_mode=effective_dev_mode) as session:
                 async with _maybe_use_branch(session, project_id, branch):
+                    # run_query is given an existing id, so the explore link
+                    # isn't in hand — fetch the Query object to recover it.
+                    # The /run endpoint returns only data rows.
+                    query_def = await session.get(f"/queries/{query_id}")
                     result = await _execute_saved_query(
                         session,
                         query_id,
@@ -359,19 +410,10 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                         server_table_calcs=server_table_calcs,
                         cache=cache,
                     )
-                    if isinstance(result, list):
-                        return json.dumps(
-                            {"row_count": len(result), "data": result},
-                            indent=2,
-                        )
-                    if isinstance(result, str):
-                        # text/plain formats (csv, txt) — wrap so the
-                        # response shape is always JSON for MCP transport.
-                        return json.dumps(
-                            {"format": result_format, "data": result},
-                            indent=2,
-                        )
-                    return json.dumps(result, indent=2)
+                    return json.dumps(
+                        {"query": query_def, **_run_payload(result, result_format)},
+                        indent=2,
+                    )
         except Exception as e:
             return format_api_error("run_query", e)
 
@@ -396,6 +438,10 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                         "title": elem.get("title") or elem.get("title_text"),
                         "type": elem.get("type"),
                     }
+                    # The tile's embedded Query carries its explore link
+                    # (share_url) — surface it instead of dropping it.
+                    if elem.get("query"):
+                        elem_info["query"] = elem["query"]
                     query_id = (elem.get("query") or {}).get("id") if elem.get("query") else None
                     result_maker = elem.get("result_maker")
                     if result_maker:
@@ -410,10 +456,14 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
                             elem_info["error"] = "Failed to execute element query"
                     results.append(elem_info)
 
+                # Pass the dashboard's own metadata through (minus the elements,
+                # which are returned enriched above) so it isn't dropped.
+                dashboard_meta = {k: v for k, v in dashboard.items() if k != "dashboard_elements"}
                 return json.dumps(
                     {
                         "title": dashboard.get("title"),
                         "description": dashboard.get("description"),
+                        "dashboard": dashboard_meta,
                         "element_count": len(results),
                         "elements": results,
                     },

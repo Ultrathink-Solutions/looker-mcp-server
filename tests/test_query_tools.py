@@ -241,6 +241,12 @@ class TestRunQuery:
     @respx.mock
     async def test_runs_existing_query_by_id_returning_rows(self, config):
         _mock_login_logout()
+        # run_query now fetches the Query object for its explore-link metadata.
+        meta_route = respx.get(f"{API_URL}/queries/q1").mock(
+            return_value=httpx.Response(
+                200, json={"id": "q1", "share_url": "https://test.looker.com/x/q1"}
+            )
+        )
         run_route = respx.get(f"{API_URL}/queries/q1/run/json").mock(
             return_value=httpx.Response(
                 200,
@@ -269,6 +275,8 @@ class TestRunQuery:
 
         assert run_route.called, "must GET the run endpoint by ID"
         assert not create_route.called, "must NOT re-create the query via POST /queries"
+        assert meta_route.called, "must GET the Query object for its explore-link metadata"
+        assert payload["query"]["share_url"] == "https://test.looker.com/x/q1"
 
     @pytest.mark.asyncio
     @respx.mock
@@ -276,6 +284,7 @@ class TestRunQuery:
         """``result_format='csv'`` returns text/plain — must use get_text and
         wrap the raw payload in a JSON envelope."""
         _mock_login_logout()
+        respx.get(f"{API_URL}/queries/q1").mock(return_value=httpx.Response(200, json={"id": "q1"}))
         csv_body = "orders.region,orders.total\nwest,42\neast,17\n"
         respx.get(f"{API_URL}/queries/q1/run/csv").mock(
             return_value=httpx.Response(
@@ -308,6 +317,7 @@ class TestRunQuery:
         explicitly. This test pins that — a regression to httpx's default
         would silently make ``apply_formatting`` etc. no-ops."""
         _mock_login_logout()
+        respx.get(f"{API_URL}/queries/q1").mock(return_value=httpx.Response(200, json={"id": "q1"}))
         run_route = respx.get(f"{API_URL}/queries/q1/run/json").mock(
             return_value=httpx.Response(200, json=[])
         )
@@ -356,6 +366,7 @@ class TestRunQuery:
         param, so it deliberately doesn't appear here; ``limit`` is
         ``None`` by default so it's correctly omitted."""
         _mock_login_logout()
+        respx.get(f"{API_URL}/queries/q1").mock(return_value=httpx.Response(200, json={"id": "q1"}))
         run_route = respx.get(f"{API_URL}/queries/q1/run/json").mock(
             return_value=httpx.Response(200, json=[])
         )
@@ -392,6 +403,7 @@ class TestRunQuery:
         put_branch = respx.put(f"{API_URL}/projects/proj1/git_branch").mock(
             return_value=httpx.Response(200, json={"name": "feature-x"})
         )
+        respx.get(f"{API_URL}/queries/q1").mock(return_value=httpx.Response(200, json={"id": "q1"}))
         respx.get(f"{API_URL}/queries/q1/run/json").mock(
             return_value=httpx.Response(200, json=[{"orders.region": "west"}])
         )
@@ -568,3 +580,241 @@ class TestSearchContentHiddenFiltering:
         finally:
             await looker_client.close()
         assert len(payload) == 3
+
+
+class TestExploreLinkPassthrough:
+    """The query-group tools must surface the explore link — and the rest of
+    the ``Query`` / ``Look`` object Looker returns — instead of dropping it.
+
+    Looker hands back ``share_url`` / ``expanded_share_url`` / ``url`` on every
+    created ``Query``; the ``/run`` endpoints return only data rows, so the
+    metadata is read from the ``Query`` / ``Look`` object and merged into the
+    response envelope alongside the data. Existing keys (``row_count``,
+    ``data``, ``format``, ``sql``) are preserved — the metadata is additive.
+    """
+
+    QUERY_OBJ = {
+        "id": "q1",
+        "slug": "abc123def456789012345x",
+        "share_url": "https://test.looker.com/x/abc123def456789012345x",
+        "expanded_share_url": (
+            "https://test.looker.com/explore/ecommerce/orders?fields=orders.region&limit=500"
+        ),
+        "url": "/explore/ecommerce/orders?qid=abc123def456789012345x",
+        # Opaque fields are passed through verbatim too — "don't drop stuff".
+        "vis_config": {"type": "looker_grid"},
+        "can": {"run": True},
+    }
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_surfaces_full_query_object_with_explore_link(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/queries").mock(return_value=httpx.Response(201, json=self.QUERY_OBJ))
+        respx.get(f"{API_URL}/queries/q1/run/json").mock(
+            return_value=httpx.Response(200, json=[{"orders.region": "west"}])
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {"model": "ecommerce", "view": "orders", "fields": ["orders.region"]},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        # The full Query object is passed through verbatim — nothing dropped.
+        assert payload["query"] == self.QUERY_OBJ
+        assert payload["query"]["share_url"] == "https://test.looker.com/x/abc123def456789012345x"
+        # Data envelope preserved.
+        assert payload["row_count"] == 1
+        assert payload["data"] == [{"orders.region": "west"}]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_sql_surfaces_query_object_alongside_sql(self, config):
+        _mock_login_logout()
+        compiled_sql = "SELECT region FROM orders"
+        respx.post(f"{API_URL}/queries").mock(return_value=httpx.Response(201, json=self.QUERY_OBJ))
+        respx.get(f"{API_URL}/queries/q1/run/sql").mock(
+            return_value=httpx.Response(
+                200, text=compiled_sql, headers={"content-type": "text/plain"}
+            )
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query_sql",
+                    {"model": "ecommerce", "view": "orders", "fields": ["orders.region"]},
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert payload["sql"] == compiled_sql
+        assert payload["query"] == self.QUERY_OBJ
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_query_fetches_and_surfaces_query_metadata(self, config):
+        _mock_login_logout()
+        # run_query takes an existing id, so it must GET the Query object to
+        # recover the explore link the run endpoint doesn't return.
+        meta_route = respx.get(f"{API_URL}/queries/q1").mock(
+            return_value=httpx.Response(200, json=self.QUERY_OBJ)
+        )
+        respx.get(f"{API_URL}/queries/q1/run/json").mock(
+            return_value=httpx.Response(200, json=[{"orders.region": "west"}])
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("run_query", {"query_id": "q1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert meta_route.called, "run_query must fetch the Query object for its metadata"
+        assert payload["query"] == self.QUERY_OBJ
+        assert payload["row_count"] == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_look_surfaces_full_look_object(self, config):
+        _mock_login_logout()
+        look_obj = {
+            "id": "55",
+            "title": "Top regions",
+            "short_url": "/looks/55",
+            "public_url": "https://test.looker.com/public/look55",
+            # The Look embeds its own Query, which carries the explore link.
+            "query": {"id": "q9", "share_url": "https://test.looker.com/x/look55query"},
+        }
+        meta_route = respx.get(f"{API_URL}/looks/55").mock(
+            return_value=httpx.Response(200, json=look_obj)
+        )
+        respx.get(f"{API_URL}/looks/55/run/json").mock(
+            return_value=httpx.Response(200, json=[{"orders.region": "west"}])
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("run_look", {"look_id": "55"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert meta_route.called, "run_look must fetch the Look object for its metadata"
+        assert payload["look"] == look_obj
+        assert payload["look"]["query"]["share_url"] == "https://test.looker.com/x/look55query"
+        assert payload["row_count"] == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_dashboard_surfaces_per_tile_explore_link(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/dashboards/d1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "title": "Ops",
+                    "description": None,
+                    "slug": "ops-dash",
+                    "dashboard_elements": [
+                        {
+                            "title": "Top regions",
+                            "type": "vis",
+                            "query": {
+                                "id": "qA",
+                                "share_url": "https://test.looker.com/x/tileA",
+                            },
+                        }
+                    ],
+                },
+            )
+        )
+        respx.get(f"{API_URL}/queries/qA/run/json").mock(
+            return_value=httpx.Response(200, json=[{"orders.region": "west"}])
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool("run_dashboard", {"dashboard_id": "d1"})
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        elem = payload["elements"][0]
+        # The tile's embedded Query (with its explore link) is no longer dropped.
+        assert elem["query"]["share_url"] == "https://test.looker.com/x/tileA"
+        assert elem["row_count"] == 1
+        # Dashboard-level metadata is surfaced, minus the re-nested elements.
+        assert payload["dashboard"]["slug"] == "ops-dash"
+        assert "dashboard_elements" not in payload["dashboard"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_csv_routes_through_text_plain(self, config):
+        """``query`` advertises csv/txt; Looker returns those as text/plain, so
+        the run must route through get_text — session.get would JSON-decode the
+        body and fail. The metadata block is still surfaced alongside the text."""
+        _mock_login_logout()
+        respx.post(f"{API_URL}/queries").mock(return_value=httpx.Response(201, json=self.QUERY_OBJ))
+        csv_body = "orders.region\nwest\n"
+        respx.get(f"{API_URL}/queries/q1/run/csv").mock(
+            return_value=httpx.Response(200, text=csv_body, headers={"content-type": "text/plain"})
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                        "result_format": "csv",
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert payload["format"] == "csv"
+        assert payload["data"] == csv_body
+        assert payload["query"] == self.QUERY_OBJ
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_look_csv_routes_through_text_plain(self, config):
+        """``run_look`` advertises csv/txt — same text/plain routing as query."""
+        _mock_login_logout()
+        look_obj = {"id": "55", "short_url": "/looks/55"}
+        respx.get(f"{API_URL}/looks/55").mock(return_value=httpx.Response(200, json=look_obj))
+        csv_body = "orders.region\nwest\n"
+        respx.get(f"{API_URL}/looks/55/run/csv").mock(
+            return_value=httpx.Response(200, text=csv_body, headers={"content-type": "text/plain"})
+        )
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "run_look", {"look_id": "55", "result_format": "csv"}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+        assert payload["format"] == "csv"
+        assert payload["data"] == csv_body
+        assert payload["look"] == look_obj
