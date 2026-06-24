@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-23
+
+Surface the Looker explore link — and the rest of the `Query`/`Look` object
+Looker returns — across the query-group tools instead of discarding it, plus a
+text/plain routing fix for `csv`/`txt` output.
+
+### Added
+
+- **The query-group tools now return the explore link and full Query/Look
+  metadata alongside the data.** Looker hands back `share_url`,
+  `expanded_share_url`, and `url` on every created query, but the run tools
+  previously returned only data rows and dropped the rest. Now `query` and
+  `query_sql` include the full `Query` object they already create from
+  `POST /queries`; `run_query` and `run_look` fetch the `Query`/`Look` object
+  (`GET /queries/{id}`, `GET /looks/{id}`) to recover the metadata the `/run`
+  endpoints omit; and `run_dashboard` surfaces each tile's embedded `Query`
+  (with its `share_url`) plus the dashboard's own metadata. Existing response
+  keys (`row_count`, `data`, `format`, `sql`) are preserved — the metadata is
+  additive.
+
+### Fixed
+
+- **`query` and `run_look` now route `csv`/`txt` output through `get_text`.**
+  Both tools advertised `csv`/`txt` but always called `session.get`, which
+  decodes the response as JSON and fails on Looker's `text/plain` payload. The
+  format-aware routing is now a shared `_run_path` helper (also adopted by
+  `_execute_saved_query`) so it can't drift between call sites.
+
 ## [0.21.0] - 2026-06-11
 
 Two themes: git-recovery primitives for per-user dev workspaces (the
@@ -1042,7 +1070,8 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.18.0...v0.19.0
