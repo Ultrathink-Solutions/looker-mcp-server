@@ -178,10 +178,17 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
     # ── Dashboards ───────────────────────────────────────────────────
 
     @server.tool(
-        description="Search for dashboards by title, description, or other criteria.",
+        description=(
+            "Search user-defined dashboards by title, description, or other "
+            "criteria. Does NOT return LookML dashboards (those defined in a "
+            "LookML project) — use list_lookml_dashboards for those."
+        ),
     )
     async def list_dashboards(
-        title: Annotated[str | None, "Filter by title (partial match)"] = None,
+        title: Annotated[
+            str | None,
+            "Filter by title — SQL LIKE pattern, so use '%Revenue%' for a partial match",
+        ] = None,
         folder_id: Annotated[str | None, "Filter by folder ID"] = None,
         limit: Annotated[int, "Maximum results"] = 50,
     ) -> str:
@@ -207,6 +214,52 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
                 return json.dumps(result, indent=2)
         except Exception as e:
             return format_api_error("list_dashboards", e)
+
+    @server.tool(
+        description=(
+            "Search LookML dashboards — those defined in a LookML project "
+            "rather than built in the UI. These are invisible to "
+            "list_dashboards and are addressed as 'model::slug' "
+            "(e.g. 'analytics::executive_overview'). Title filters use SQL "
+            "LIKE pattern matching, so use '%Revenue%' for partial matches. "
+            "Only returns LookML dashboards deployed to production — a "
+            "dashboard on an unmerged branch will not appear."
+        ),
+    )
+    async def list_lookml_dashboards(
+        title: Annotated[
+            str | None,
+            "Filter by title — SQL LIKE pattern, so use '%Revenue%' for a partial match",
+        ] = None,
+        folder_id: Annotated[str | None, "Filter by folder ID"] = None,
+        limit: Annotated[int, "Maximum results"] = 50,
+    ) -> str:
+        ctx = client.build_context("list_lookml_dashboards", "content")
+        try:
+            async with client.session(ctx) as session:
+                params: dict[str, Any] = {"limit": limit}
+                if title:
+                    params["title"] = title
+                if folder_id:
+                    params["folder_id"] = folder_id
+                dashboards = await session.get("/dashboards/lookml/search", params=params)
+                # The generated SDK types this response as a singular
+                # DashboardLookml, but the endpoint returns a collection.
+                # Tolerate both rather than trusting the annotation.
+                if isinstance(dashboards, dict):
+                    dashboards = [dashboards]
+                result = [
+                    {
+                        "id": d.get("id"),
+                        "title": d.get("title"),
+                        "description": d.get("description"),
+                        "folder_id": d.get("folder_id"),
+                    }
+                    for d in (dashboards or [])
+                ]
+                return json.dumps(result, indent=2)
+        except Exception as e:
+            return format_api_error("list_lookml_dashboards", e)
 
     @server.tool(
         description="Create a new empty dashboard in the specified folder.",

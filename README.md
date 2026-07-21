@@ -102,7 +102,7 @@ Tools are organized into groups that can be selectively enabled. Default groups 
 | **explore**\* | `list_models`, `get_model`, `get_explore`, `list_dimensions`, `list_measures`, `list_connections` | Browse LookML models, explores, and fields |
 | **query**\* | `query`, `query_sql`, `run_query`, `run_look`, `run_dashboard`, `query_url`, `search_content` | Run queries through the semantic layer |
 | **schema**\* | `list_databases`, `list_schemas`, `list_tables`, `list_columns` | Inspect underlying database schema |
-| **content**\* | `list_looks`, `create_look`, `update_look`, `delete_look`, `list_dashboards`, `create_dashboard`, `update_dashboard`, `delete_dashboard`, `add_dashboard_element`, `add_dashboard_filter`, `generate_embed_url`, `validate_content` | Manage Looks and dashboards |
+| **content**\* | `list_looks`, `create_look`, `update_look`, `delete_look`, `list_dashboards`, `list_lookml_dashboards`, `create_dashboard`, `update_dashboard`, `delete_dashboard`, `add_dashboard_element`, `add_dashboard_filter`, `generate_embed_url`, `validate_content` | Manage Looks and dashboards |
 | **board** | `list_boards`, `get_board`, `create_board`, `update_board`, `delete_board`, `get_board_section`, `create_board_section`, `update_board_section`, `delete_board_section`, `get_board_item`, `create_board_item`, `update_board_item`, `delete_board_item` | Curate content with boards, sections, and items |
 | **folder** | `list_folders`, `get_folder`, `create_folder`, `update_folder`, `delete_folder`, `get_folder_children`, `get_folder_ancestors`, `get_folder_looks`, `get_folder_dashboards` | Navigate and manage the folder hierarchy |
 | **health**\* | `health_pulse`, `health_analyze`, `health_vacuum` | Instance health checks and usage analysis |

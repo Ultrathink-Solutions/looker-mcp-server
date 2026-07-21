@@ -223,3 +223,70 @@ class TestCreateLookMaterializesQuery:
         assert not create_look_route.called
         payload = json.loads(_text(result))
         assert payload["status"] == 400
+
+
+class TestLookmlDashboardDiscovery:
+    """/dashboards/search covers user-defined dashboards only — the Looker
+    spec says so explicitly. LookML dashboards need their own endpoint, and
+    without it the only way to find a model::slug id is grepping the LookML
+    repo."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_uses_the_lookml_search_endpoint(self, config):
+        _mock_login_logout()
+        route = respx.get(f"{API_URL}/dashboards/lookml/search").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "analytics::executive_overview",
+                        "title": "Executive Overview",
+                        "folder_id": "9",
+                    }
+                ],
+            )
+        )
+
+        mcp, _ = create_server(config, enabled_groups={"content"})
+        async with Client(mcp) as mcp_client:
+            result = await mcp_client.call_tool("list_lookml_dashboards", {"title": "%Executive%"})
+
+        assert route.called
+        assert route.calls[0].request.url.params["title"] == "%Executive%"
+
+        payload = json.loads(_text(result))
+        assert payload[0]["id"] == "analytics::executive_overview"
+        assert payload[0]["title"] == "Executive Overview"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_handles_a_dict_wrapped_response(self, config):
+        """The generated SDK types this endpoint's response as a singular
+        DashboardLookml even though it returns a collection. Tolerate both
+        rather than trusting the annotation."""
+        _mock_login_logout()
+        respx.get(f"{API_URL}/dashboards/lookml/search").mock(
+            return_value=httpx.Response(200, json={"id": "m::only_one", "title": "Only One"})
+        )
+
+        mcp, _ = create_server(config, enabled_groups={"content"})
+        async with Client(mcp) as mcp_client:
+            result = await mcp_client.call_tool("list_lookml_dashboards", {})
+
+        payload = json.loads(_text(result))
+        assert payload[0]["id"] == "m::only_one"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_empty_result_is_an_empty_list(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/dashboards/lookml/search").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        mcp, _ = create_server(config, enabled_groups={"content"})
+        async with Client(mcp) as mcp_client:
+            result = await mcp_client.call_tool("list_lookml_dashboards", {})
+
+        assert json.loads(_text(result)) == []
