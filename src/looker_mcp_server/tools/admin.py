@@ -24,9 +24,9 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
             "pattern matching — wrap values in '%' for partial matches "
             "(e.g. email='%acme.com' or name='%dana%'); '_' matches any "
             "single character, so a value containing an underscore matches "
-            "more than the literal string. Without wildcards a filter "
-            "matches the whole value exactly. Returns an empty list when "
-            "nothing matches; "
+            "more than the literal string. Matching is case-insensitive, and "
+            "without wildcards a filter matches the whole field rather than "
+            "part of it. Returns an empty list when nothing matches; "
             "omit all filters to list every user."
         ),
     )
@@ -36,14 +36,15 @@ def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
             "Filter by email — SQL LIKE pattern, so use '%dana%' for a "
             "partial match. '_' matches any single character, so a literal "
             "underscore (e.g. 'dana_smith@example.com') will also match "
-            "'danaXsmith@example.com'. Bare 'dana' matches only the "
-            "literal string",
+            "'danaXsmith@example.com'. Matching is case-insensitive; bare "
+            "'dana' matches the whole field, not a substring of it",
         ] = None,
         name: Annotated[
             str | None,
             "Filter by full name (First Last) — SQL LIKE pattern, so use "
             "'%dana%' for a partial match. '_' matches any single "
-            "character, not just a literal underscore",
+            "character, not just a literal underscore. Matching is "
+            "case-insensitive",
         ] = None,
         limit: Annotated[int, "Maximum results"] = 100,
     ) -> str:
