@@ -18,18 +18,48 @@ from ._helpers import _path_seg, _set_if
 def register_admin_tools(server: FastMCP, client: LookerClient) -> None:
     # ── Users ────────────────────────────────────────────────────────
 
-    @server.tool(description="List all users in the Looker instance.")
+    @server.tool(
+        description=(
+            "Search users in the Looker instance. Filters use SQL LIKE "
+            "pattern matching — wrap values in '%' for partial matches "
+            "(e.g. email='%acme.com' or name='%dana%'); '_' matches any "
+            "single character, so a value containing an underscore matches "
+            "more than the literal string. Matching is case-insensitive, and "
+            "without wildcards a filter matches the whole field rather than "
+            "part of it. Returns an empty list when nothing matches; "
+            "omit all filters to list every user."
+        ),
+    )
     async def list_users(
-        email: Annotated[str | None, "Filter by email address"] = None,
+        email: Annotated[
+            str | None,
+            "Filter by email — SQL LIKE pattern, so use '%dana%' for a "
+            "partial match. '_' matches any single character, so a literal "
+            "underscore (e.g. 'dana_smith@example.com') will also match "
+            "'danaXsmith@example.com'. Matching is case-insensitive; bare "
+            "'dana' matches the whole field, not a substring of it",
+        ] = None,
+        name: Annotated[
+            str | None,
+            "Filter by full name (First Last) — SQL LIKE pattern, so use "
+            "'%dana%' for a partial match. '_' matches any single "
+            "character, not just a literal underscore. Matching is "
+            "case-insensitive",
+        ] = None,
         limit: Annotated[int, "Maximum results"] = 100,
     ) -> str:
         ctx = client.build_context("list_users", "admin")
         try:
             async with client.session(ctx) as session:
+                # GET /users has no email/name parameters — Looker ignores
+                # unknown query params, so filtering there silently returned
+                # every user. /users/search is the filtering endpoint, and it
+                # returns all users when given no criteria, so there is one
+                # code path rather than two.
                 params: dict[str, Any] = {"limit": limit}
-                if email:
-                    params["email"] = email
-                users = await session.get("/users", params=params)
+                _set_if(params, "email", email)
+                _set_if(params, "full_name", name)
+                users = await session.get("/users/search", params=params)
                 result = [
                     {
                         "id": u.get("id"),

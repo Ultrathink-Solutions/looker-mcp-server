@@ -19,6 +19,7 @@ from ._helpers import (
     _maybe_use_branch,
     _validate_branch_args,
 )
+from ._query_spec import build_query_body, create_query
 
 # Looker returns these formats as ``text/plain`` rather than JSON; calling
 # ``session.get`` on them would raise ``Expecting value`` from the JSON
@@ -168,18 +169,17 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             effective_dev_mode = dev_mode or branch is not None
             async with client.session(ctx, dev_mode=effective_dev_mode) as session:
                 async with _maybe_use_branch(session, project_id, branch):
-                    body: dict[str, Any] = {
-                        "model": model,
-                        "view": view,
-                        "fields": fields,
-                        "limit": str(limit),
-                    }
-                    if filters:
-                        body["filters"] = filters
-                    if sorts:
-                        body["sorts"] = sorts
-
-                    query_def = await session.post("/queries", body=body)
+                    query_def = await create_query(
+                        session,
+                        build_query_body(
+                            model=model,
+                            view=view,
+                            fields=fields,
+                            filters=filters,
+                            sorts=sorts,
+                            limit=limit,
+                        ),
+                    )
                     query_id = query_def["id"]
 
                     result = await _run_path(
@@ -239,18 +239,17 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             effective_dev_mode = dev_mode or branch is not None
             async with client.session(ctx, dev_mode=effective_dev_mode) as session:
                 async with _maybe_use_branch(session, project_id, branch):
-                    body: dict[str, Any] = {
-                        "model": model,
-                        "view": view,
-                        "fields": fields,
-                        "limit": str(limit),
-                    }
-                    if filters:
-                        body["filters"] = filters
-                    if sorts:
-                        body["sorts"] = sorts
-
-                    query_def = await session.post("/queries", body=body)
+                    query_def = await create_query(
+                        session,
+                        build_query_body(
+                            model=model,
+                            view=view,
+                            fields=fields,
+                            filters=filters,
+                            sorts=sorts,
+                            limit=limit,
+                        ),
+                    )
                     query_id = query_def["id"]
 
                     # Looker returns the compiled SQL as text/plain; calling
@@ -511,17 +510,16 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
             effective_dev_mode = dev_mode or branch is not None
             async with client.session(ctx, dev_mode=effective_dev_mode) as session:
                 async with _maybe_use_branch(session, project_id, branch):
-                    body: dict[str, Any] = {
-                        "model": model,
-                        "view": view,
-                        "fields": fields,
-                    }
-                    if filters:
-                        body["filters"] = filters
-                    if sorts:
-                        body["sorts"] = sorts
-
-                    query_def = await session.post("/queries", body=body)
+                    query_def = await create_query(
+                        session,
+                        build_query_body(
+                            model=model,
+                            view=view,
+                            fields=fields,
+                            filters=filters,
+                            sorts=sorts,
+                        ),
+                    )
                     share_url = query_def.get("share_url") or query_def.get("url")
                     return json.dumps(
                         {"url": share_url, "query_id": query_def.get("id")},

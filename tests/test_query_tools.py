@@ -531,6 +531,148 @@ class TestRunDashboardSharesRunQueryPath:
         )
 
 
+class TestQueryUrl:
+    """``query_url`` materializes a Query and hands back its share link —
+    but deliberately sends no ``limit`` key: it has no ``limit`` parameter
+    and never posts one, unlike ``query``/``query_sql``. The shared
+    ``build_query_body`` helper makes ``limit`` optional precisely so this
+    asymmetry survives the refactor; these tests pin it so a later "tidy
+    up the builder call" pass can't silently reintroduce it."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_posts_query_body_with_no_limit_key(self, config):
+        _mock_login_logout()
+        create_route = respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(
+                201, json={"id": "q1", "share_url": "https://test.looker.com/x/q1"}
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "query_url",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                    },
+                )
+        finally:
+            await looker_client.close()
+
+        assert create_route.called
+        body = json.loads(create_route.calls.last.request.content.decode())
+        assert "limit" not in body, (
+            "query_url must never send a limit key — this is the whole "
+            "point of the test, guarding against a future build_query_body "
+            "call picking up limit= during cleanup"
+        )
+        assert body["model"] == "ecommerce"
+        assert body["view"] == "orders"
+        assert body["fields"] == ["orders.region"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_share_url_and_query_id(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "id": "q1",
+                    "share_url": "https://test.looker.com/x/q1",
+                    "url": "/explore/ecommerce/orders?qid=q1",
+                },
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query_url",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert payload == {"url": "https://test.looker.com/x/q1", "query_id": "q1"}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_falls_back_to_url_when_share_url_absent(self, config):
+        """Looker doesn't always populate ``share_url`` — the tool must fall
+        back to ``url`` rather than returning null."""
+        _mock_login_logout()
+        respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(
+                201,
+                json={"id": "q2", "url": "/explore/ecommerce/orders?qid=q2"},
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query_url",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert payload == {"url": "/explore/ecommerce/orders?qid=q2", "query_id": "q2"}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_filters_and_sorts_reach_the_request_body(self, config):
+        _mock_login_logout()
+        create_route = respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(
+                201, json={"id": "q1", "share_url": "https://test.looker.com/x/q1"}
+            )
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "query_url",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region", "orders.total_revenue"],
+                        "filters": {"orders.created_date": "90 days"},
+                        "sorts": ["orders.total_revenue desc"],
+                    },
+                )
+        finally:
+            await looker_client.close()
+
+        assert create_route.called
+        body = json.loads(create_route.calls.last.request.content.decode())
+        assert body["filters"] == {"orders.created_date": "90 days"}
+        assert body["sorts"] == ["orders.total_revenue desc"]
+        assert "limit" not in body
+
+
 class TestSearchContentHiddenFiltering:
     """``search_content`` drops results carrying a truthy ``hidden`` flag by
     default; ``include_hidden=True`` passes the raw result set through.
