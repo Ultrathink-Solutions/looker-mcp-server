@@ -12,6 +12,20 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
+from ._query_spec import (
+    ColumnLimit,
+    DynamicFields,
+    FillFields,
+    FilterExpression,
+    Pivots,
+    QueryTimezone,
+    RowTotal,
+    Subtotals,
+    Total,
+    VisConfig,
+    build_query_body,
+    create_query,
+)
 
 
 def register_content_tools(server: FastMCP, client: LookerClient) -> None:
@@ -51,8 +65,10 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Create a new saved Look with a query definition. "
-            "The Look is saved in the specified folder."
+            "Create a new saved Look from a query definition. The query is "
+            "materialized first, then saved as a Look in the specified folder. "
+            "Supports pivots, visualization config, totals, and timezone — not "
+            "just flat tables."
         ),
     )
     async def create_look(
@@ -65,32 +81,61 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
         sorts: Annotated[list[str] | None, "Sort expressions"] = None,
         limit: Annotated[int, "Row limit for the query"] = 500,
         description: Annotated[str | None, "Description of the Look"] = None,
+        pivots: Pivots = None,
+        fill_fields: FillFields = None,
+        filter_expression: FilterExpression = None,
+        column_limit: ColumnLimit = None,
+        total: Total = None,
+        row_total: RowTotal = None,
+        subtotals: Subtotals = None,
+        vis_config: VisConfig = None,
+        query_timezone: QueryTimezone = None,
+        dynamic_fields: DynamicFields = None,
     ) -> str:
         ctx = client.build_context("create_look", "content")
         try:
             async with client.session(ctx) as session:
-                query_body: dict[str, Any] = {
-                    "model": model,
-                    "view": view,
-                    "fields": fields,
-                    "limit": str(limit),
-                }
-                if filters:
-                    query_body["filters"] = filters
-                if sorts:
-                    query_body["sorts"] = sorts
+                # Looker's POST /looks takes a query_id, not an inline query —
+                # an inline query 422s with {"field": "query_id", "code":
+                # "missing"}. Materialize first, then save.
+                query_def = await create_query(
+                    session,
+                    build_query_body(
+                        model=model,
+                        view=view,
+                        fields=fields,
+                        filters=filters,
+                        sorts=sorts,
+                        limit=limit,
+                        pivots=pivots,
+                        fill_fields=fill_fields,
+                        filter_expression=filter_expression,
+                        column_limit=column_limit,
+                        total=total,
+                        row_total=row_total,
+                        subtotals=subtotals,
+                        vis_config=vis_config,
+                        query_timezone=query_timezone,
+                        dynamic_fields=dynamic_fields,
+                    ),
+                )
 
                 body: dict[str, Any] = {
                     "title": title,
                     "folder_id": folder_id,
-                    "query": query_body,
+                    "query_id": query_def["id"],
                 }
                 if description:
                     body["description"] = description
 
                 look = await session.post("/looks", body=body)
                 return json.dumps(
-                    {"id": look.get("id"), "title": look.get("title"), "url": look.get("url")},
+                    {
+                        "id": look.get("id"),
+                        "title": look.get("title"),
+                        "url": look.get("url"),
+                        "query_id": query_def["id"],
+                    },
                     indent=2,
                 )
         except Exception as e:
