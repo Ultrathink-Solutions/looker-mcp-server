@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-21
+
+`create_look` has failed on every invocation since it shipped, and `list_users`
+silently ignored its filter. Both are fixed, along with the discoverability gap
+that made LookML dashboards unreachable.
+
+### Fixed
+
+- **`create_look` now materializes the query before saving the Look.** It
+  previously inlined a query object into `POST /looks`, but Looker requires a
+  `query_id` naming an already-materialized Query, so every call failed with
+  `{"field": "query_id", "code": "missing"}`. The tool now calls `POST /queries`
+  first and saves the Look against the returned id.
+- **`list_users` filters via `GET /users/search` instead of `GET /users`.**
+  `GET /users` has no `email` parameter, and Looker ignores unknown query
+  params, so the filter was silently dropped and every user was returned —
+  indistinguishable from a genuine match on all of them. Filtered and unfiltered
+  calls now share one path, so a genuine no-match returns an empty list.
+- **`create_look`'s `description` argument now reaches Looker.** The argument
+  already existed, but the request failed before the body was ever sent.
+
+### Added
+
+- **`create_look` accepts the full `WriteQuery` surface** — `pivots`,
+  `vis_config`, `query_timezone`, `total`, `row_total`, `subtotals`,
+  `column_limit`, `fill_fields`, `filter_expression`, and `dynamic_fields`.
+  Saved Looks are no longer limited to flat tables.
+- **`list_lookml_dashboards`** — searches LookML dashboards via
+  `GET /dashboards/lookml/search` and returns their `model::slug` ids.
+  `search_dashboards` covers user-defined dashboards only, so LookML dashboards
+  were previously unreachable through the MCP. Looker returns only LookML
+  dashboards deployed to production.
+- **`list_users` accepts a `name` filter**, mapped to Looker's `full_name`.
+- First tests for the `content` and `admin` tool groups.
+
+### Changed
+
+- **Shared `tools/_query_spec.py` now owns `WriteQuery` assembly and the
+  `POST /queries` step** for `query`, `query_sql`, `query_url`, and
+  `create_look`. The body was previously hand-rolled at three sites in
+  `query.py` plus a fourth, divergent shape in `content.py`; that divergence is
+  what allowed the `create_look` bug to ship. No tool signatures changed.
+- **Tool descriptions document SQL `LIKE` semantics** where Looker applies them.
+  `list_users` and `list_lookml_dashboards` now state that `%` matches any
+  sequence and `_` any single character, that matching is case-insensitive, and
+  that a bare value matches the whole field. `list_dashboards`' `title` filter is
+  corrected from "(partial match)" to the same semantics. Filter values are
+  passed through verbatim and are never auto-wrapped, which would break
+  exact-match lookups.
+- **`list_dashboards`' description states that it excludes LookML dashboards**
+  and names `list_lookml_dashboards`.
+
 ## [0.22.0] - 2026-06-23
 
 Surface the Looker explore link — and the rest of the `Query`/`Look` object
