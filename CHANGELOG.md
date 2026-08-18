@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-08-18
+
+In `looker_oauth` mode, standard MCP clients could not complete the PKCE flow:
+the Protected Resource Metadata omitted `scopes_supported`, clients therefore
+sent no `scope` parameter (they source it from the WWW-Authenticate challenge
+or the PRM only, never from AS metadata), and Looker's `/auth` rejected the
+authorization with `invalid_scope`.
+
+### Fixed
+
+- **The `looker_oauth`-mode PRM advertises `scopes_supported: ["cors_api"]`.**
+  `cors_api` is the one scope Looker's CORS-API PKCE flow accepts, so clients
+  that populate `scope` from the PRM now complete the flow. Public-mode PRM
+  behavior is unchanged — its authorization server is a generic OIDC issuer
+  with no fixed scope set, and a regression test now pins the field's absence
+  there.
+- **A blank scopes override fails closed at startup.** An empty or comma-only
+  `LOOKER_OAUTH_SCOPES_SUPPORTED` would have advertised no scopes and silently
+  reproduced the `invalid_scope` failure; configuration construction now
+  rejects it.
+
+### Added
+
+- **`LOOKER_OAUTH_SCOPES_SUPPORTED`** (default `cors_api`, comma-separated):
+  the scopes the `looker_oauth`-mode PRM advertises. The default is correct
+  for every Looker instance; the override exists for field serviceability
+  only. Documented in the README configuration table.
+
 ## [0.23.0] - 2026-07-21
 
 `create_look` has failed on every invocation since it shipped, and `list_users`
@@ -1122,7 +1150,9 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.0...v0.23.1
+[0.23.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.19.0...v0.20.0
