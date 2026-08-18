@@ -154,6 +154,7 @@ All settings are configured via environment variables with the `LOOKER_` prefix,
 | `LOOKER_MCP_JWKS_URI` | | Authorization server JWK Set URL (RFC 7517). **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL. |
 | `LOOKER_MCP_ISSUER_URL` | | Expected `iss` claim (RFC 8414). **Required when `LOOKER_MCP_MODE=public`.** Must be an `https://` URL. |
 | `LOOKER_MCP_RESOURCE_URI` | | This server's canonical URI for RFC 8707 audience binding and the RFC 9728 PRM `resource` field. **Required when `LOOKER_MCP_MODE=public` or `looker_oauth`** (in `looker_oauth` it is this MCP server's own public URI — the host of the `resource_metadata` PRM URL — and has no default, since it must not point at Looker's host). Must be an `https://` URL without fragment. |
+| `LOOKER_OAUTH_SCOPES_SUPPORTED` | `cors_api` | Comma-separated OAuth scopes advertised in the `looker_oauth`-mode PRM `scopes_supported` (RFC 9728 §2). Looker's CORS-API PKCE flow accepts exactly `cors_api`, so the default is correct for every Looker instance; the override exists for field serviceability only. Must contain at least one non-empty scope — the server fails closed at startup on a blank value. |
 | `LOOKER_MCP_AUTH_TOKEN` | | Static bearer token for MCP-level authentication. **Deprecated** — emits a warning in `dev` mode, rejected outright in `public` mode (RFC 9068 §2.1 forbids symmetric static bearers for OAuth 2.1 access tokens). Scheduled for removal in a future major release; migrate to `LOOKER_MCP_MODE=public`. |
 
 ## Authentication & Impersonation

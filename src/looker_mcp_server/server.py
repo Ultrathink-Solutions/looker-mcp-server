@@ -275,12 +275,19 @@ def create_server(
         if config.mcp_mode == LookerMcpMode.PUBLIC:
             prm_resource_uri = config.mcp_resource_uri
             prm_authorization_server = config.mcp_issuer_url
+            # Public mode's authorization server is a generic OIDC issuer,
+            # not Looker — it has no fixed scope set to advertise here.
+            prm_scopes: list[str] | None = None
         else:
             # In looker_oauth mode Looker is the authorization server — point
             # clients at the Looker base URL so PKCE discovery resolves to
             # Looker's own OAuth endpoints (RFC 8414 metadata under the base).
             prm_resource_uri = config.looker_oauth_resource_uri
             prm_authorization_server = config.base_url
+            # Advertise the Looker CORS-API scope so standard MCP clients
+            # populate the PKCE `scope` parameter — Looker's /auth endpoint
+            # rejects an authorization request that omits it.
+            prm_scopes = config.oauth_scopes_supported_list
 
         def _prm_response() -> Any:
             from starlette.responses import JSONResponse
@@ -288,6 +295,7 @@ def create_server(
             doc = build_prm_document(
                 resource_uri=prm_resource_uri,
                 authorization_server_issuer_url=prm_authorization_server,
+                scopes_supported=prm_scopes,
             )
             return JSONResponse(
                 doc,

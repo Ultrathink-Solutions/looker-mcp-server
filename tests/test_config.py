@@ -627,3 +627,38 @@ class TestLookerOAuthModePosture:
         ):
             config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
         assert config.looker_oauth_resource_uri == "https://looker-mcp.example.com/mcp"
+
+
+class TestOauthScopesSupported:
+    """``LOOKER_OAUTH_SCOPES_SUPPORTED`` — the scopes the looker_oauth PRM
+    advertises so standard MCP clients populate the PKCE ``scope`` param."""
+
+    def test_default_is_cors_api(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.oauth_scopes_supported == "cors_api"
+        assert config.oauth_scopes_supported_list == ["cors_api"]
+
+    def test_comma_separated_override_parses_to_list(self):
+        with patch.dict(
+            os.environ,
+            {"LOOKER_OAUTH_SCOPES_SUPPORTED": "cors_api,extra"},
+            clear=True,
+        ):
+            config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
+        assert config.oauth_scopes_supported == "cors_api,extra"
+        assert config.oauth_scopes_supported_list == ["cors_api", "extra"]
+
+    @pytest.mark.parametrize("blank", ["", "   ", ",", " , ,"])
+    def test_blank_override_is_rejected_at_construction(self, blank: str):
+        """A blank value would advertise no scopes and clients would omit the
+        ``scope`` parameter Looker's /auth requires — fail closed instead."""
+        from pydantic import ValidationError
+
+        with patch.dict(
+            os.environ,
+            {"LOOKER_OAUTH_SCOPES_SUPPORTED": blank},
+            clear=True,
+        ):
+            with pytest.raises(ValidationError, match="oauth_scopes_supported"):
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]

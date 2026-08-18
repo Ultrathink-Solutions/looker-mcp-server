@@ -240,11 +240,34 @@ class LookerConfig(BaseSettings):
     (RFC 8707 §2) and as the ``resource`` field in the Protected Resource
     Metadata document (RFC 9728 §2). Required when ``mcp_mode=public``."""
 
+    # ── OAuth scopes advertised in the looker_oauth PRM ───────────────
+    oauth_scopes_supported: str = "cors_api"
+    """Comma-separated OAuth scopes advertised in ``scopes_supported`` of the
+    ``looker_oauth``-mode Protected Resource Metadata document (RFC 9728 §2).
+
+    Looker's CORS-API PKCE flow accepts exactly ``cors_api`` — that is the
+    only scope Looker's ``/auth`` endpoint recognizes today, and it is the
+    default. The override exists for field serviceability only (e.g. a
+    future Looker release adding scopes); operators should not need to set
+    it. Comma-separated rather than JSON to stay an easy plain-string env
+    var. See :attr:`oauth_scopes_supported_list` for the parsed form."""
+
     # ── Validators ───────────────────────────────────────────────────
     @field_validator("base_url")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("oauth_scopes_supported")
+    @classmethod
+    def _require_nonempty_oauth_scopes(cls, v: str) -> str:
+        # A blank or comma-only value would advertise an EMPTY scope list —
+        # build_prm_document omits an empty ``scopes_supported``, clients then
+        # send no ``scope`` parameter, and Looker's /auth rejects the request
+        # with ``invalid_scope``. Fail closed at construction instead.
+        if not any(scope.strip() for scope in v.split(",")):
+            raise ValueError("oauth_scopes_supported must contain at least one non-empty scope")
+        return v
 
     @field_validator("deployment_type")
     @classmethod
@@ -518,3 +541,12 @@ class LookerConfig(BaseSettings):
         authorization server.
         """
         return self.mcp_resource_uri
+
+    @property
+    def oauth_scopes_supported_list(self) -> list[str]:
+        """Parsed form of :attr:`oauth_scopes_supported` — the scopes list
+        passed as ``scopes_supported`` when building the ``looker_oauth`` PRM
+        document, so standard MCP clients populate the PKCE ``scope``
+        parameter (Looker's ``/auth`` endpoint rejects a request with no
+        scope)."""
+        return [s.strip() for s in self.oauth_scopes_supported.split(",") if s.strip()]
