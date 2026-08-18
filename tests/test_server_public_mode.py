@@ -198,6 +198,10 @@ class TestPrmRouteRegistration:
                         "RS256",
                         "ES256",
                     ], path
+                    # Public mode's authorization server is a generic OIDC
+                    # issuer with no fixed scope set — the PRM must not
+                    # advertise one.
+                    assert "scopes_supported" not in doc, path
         finally:
             await client.close()
 

@@ -258,6 +258,17 @@ class LookerConfig(BaseSettings):
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
 
+    @field_validator("oauth_scopes_supported")
+    @classmethod
+    def _require_nonempty_oauth_scopes(cls, v: str) -> str:
+        # A blank or comma-only value would advertise an EMPTY scope list —
+        # build_prm_document omits an empty ``scopes_supported``, clients then
+        # send no ``scope`` parameter, and Looker's /auth rejects the request
+        # with ``invalid_scope``. Fail closed at construction instead.
+        if not any(scope.strip() for scope in v.split(",")):
+            raise ValueError("oauth_scopes_supported must contain at least one non-empty scope")
+        return v
+
     @field_validator("deployment_type")
     @classmethod
     def _validate_deployment_type(cls, v: str) -> str:

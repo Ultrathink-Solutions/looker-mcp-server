@@ -648,3 +648,17 @@ class TestOauthScopesSupported:
             config = LookerConfig(_env_file=None)  # type: ignore[call-arg]
         assert config.oauth_scopes_supported == "cors_api,extra"
         assert config.oauth_scopes_supported_list == ["cors_api", "extra"]
+
+    @pytest.mark.parametrize("blank", ["", "   ", ",", " , ,"])
+    def test_blank_override_is_rejected_at_construction(self, blank: str):
+        """A blank value would advertise no scopes and clients would omit the
+        ``scope`` parameter Looker's /auth requires — fail closed instead."""
+        from pydantic import ValidationError
+
+        with patch.dict(
+            os.environ,
+            {"LOOKER_OAUTH_SCOPES_SUPPORTED": blank},
+            clear=True,
+        ):
+            with pytest.raises(ValidationError, match="oauth_scopes_supported"):
+                LookerConfig(_env_file=None)  # type: ignore[call-arg]
