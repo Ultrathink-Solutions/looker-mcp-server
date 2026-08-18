@@ -472,6 +472,28 @@ class TestLookerOAuthPrmRoute:
             await client.close()
 
 
+class TestLookerOAuthPrmScopes:
+    """The looker_oauth-mode PRM must advertise ``scopes_supported`` so
+    standard MCP clients populate the PKCE ``scope`` parameter — Looker's
+    ``/auth`` endpoint rejects an authorization request with no scope."""
+
+    @pytest.mark.asyncio
+    async def test_prm_advertises_cors_api_scope(self):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        mcp, client = create_server(_looker_oauth_config())
+        try:
+            app = mcp.http_app()
+            assert isinstance(app, Starlette)
+            with TestClient(app) as http:
+                resp = http.get(PRM_PATH)
+                assert resp.status_code == 200
+                assert resp.json()["scopes_supported"] == ["cors_api"]
+        finally:
+            await client.close()
+
+
 class TestRunTransportGuard:
     """``run()`` fails fast when an HTTP-only auth posture is paired with a
     non-HTTP transport — otherwise the auth gate would be silently omitted."""
