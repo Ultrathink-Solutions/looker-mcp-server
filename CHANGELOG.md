@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-09-21
+
+A readiness probe was drowning its own telemetry. `/readyz` verifies the Looker
+dependency over HTTP, and a kubelet calls it on a fixed period with no inbound
+trace context — so any deployment that auto-instruments `httpx` turned every
+probe into a new root trace. At the usual `periodSeconds: 10` that is roughly
+8,600 traces per day from a single replica; on one deployment it had reached
+98% of the trace store, leaving the real signal at 0.1% of records.
+
 ### Fixed
 
 - `/readyz` no longer emits a trace for its own dependency check. The probe
@@ -1167,7 +1176,8 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.2...HEAD
+[0.23.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.21.0...v0.22.0
