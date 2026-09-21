@@ -182,3 +182,138 @@ class TestReadyzExternalIdentityMode:
             resp = http.get("/readyz")
 
         assert resp.status_code == 200
+
+
+class TestReadyzIsNotTraced:
+    """The probe's own outbound call must not become a span.
+
+    A kubelet calls ``/readyz`` on a fixed period and carries no inbound
+    trace context, so in a deployment that auto-instruments httpx each
+    probe becomes a new ROOT trace. At ``periodSeconds: 10`` that is
+    ~8.6k traces/day per replica; on one real deployment it reached 98%
+    of the trace store and buried the user traffic the store existed to
+    record.
+
+    This package does not depend on OpenTelemetry — the spans are created
+    by the embedding deployment. These tests therefore stand in a fake
+    ``opentelemetry.instrumentation.utils`` rather than adding a
+    dependency, and assert the contract this package actually owns:
+    that the probe's HTTP call happens INSIDE the suppression window.
+    """
+
+    @staticmethod
+    def _install_fake_otel(monkeypatch, events: list[str]) -> None:
+        """Put a recording ``suppress_instrumentation`` on the import path.
+
+        Every parent package is injected too: ``from a.b.c import d``
+        resolves ``a`` then ``a.b`` then ``a.b.c``, so seeding only the
+        leaf would still attempt a real import of the parents and fail.
+        """
+        import sys
+        from contextlib import contextmanager
+        from types import ModuleType
+
+        @contextmanager
+        def _suppress():
+            events.append("suppress:enter")
+            try:
+                yield
+            finally:
+                events.append("suppress:exit")
+
+        utils = ModuleType("opentelemetry.instrumentation.utils")
+        utils.suppress_instrumentation = _suppress  # type: ignore[attr-defined]
+        instrumentation = ModuleType("opentelemetry.instrumentation")
+        instrumentation.utils = utils  # type: ignore[attr-defined]
+        root = ModuleType("opentelemetry")
+        root.instrumentation = instrumentation  # type: ignore[attr-defined]
+
+        monkeypatch.setitem(sys.modules, "opentelemetry", root)
+        monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation", instrumentation)
+        monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.utils", utils)
+
+    @respx.mock
+    def test_the_probe_runs_inside_the_suppression_window(self, starlette_app_factory, monkeypatch):
+        """The load-bearing assertion, and it is about ORDER.
+
+        Asserting merely that suppression was entered would still pass if
+        the ``with`` block were moved to wrap nothing — which is exactly
+        the regression that would silently restore ~8.6k traces/day. The
+        event sequence pins the probe between enter and exit.
+        """
+        events: list[str] = []
+        self._install_fake_otel(monkeypatch, events)
+
+        config = _config(client_id="", client_secret="")
+
+        def _record_probe(request):
+            events.append("probe")
+            return httpx.Response(200)
+
+        respx.head(config.base_url).mock(side_effect=_record_probe)
+
+        app = starlette_app_factory(config)
+        with TestClient(app) as http:
+            resp = http.get("/readyz")
+
+        assert resp.status_code == 200
+        assert events == ["suppress:enter", "probe", "suppress:exit"]
+
+    @respx.mock
+    def test_service_account_mode_is_suppressed_too(self, starlette_app_factory, monkeypatch):
+        """Both readiness shapes reach Looker over HTTP, so covering only
+        the reachability branch would leave a service-account deployment
+        emitting the same per-probe trace.
+        """
+        events: list[str] = []
+        self._install_fake_otel(monkeypatch, events)
+
+        config = _config()
+
+        def _record_login(request):
+            events.append("probe")
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        respx.post(f"{config.base_url}/api/4.0/login").mock(side_effect=_record_login)
+        respx.delete(f"{config.base_url}/api/4.0/logout").mock(return_value=httpx.Response(204))
+
+        app = starlette_app_factory(config)
+        with TestClient(app) as http:
+            http.get("/readyz")
+
+        assert events[0] == "suppress:enter"
+        assert events[-1] == "suppress:exit"
+        assert "probe" in events
+
+    @respx.mock
+    def test_readiness_is_unchanged_when_opentelemetry_is_absent(
+        self, starlette_app_factory, monkeypatch
+    ):
+        """The positive control: the no-op path must still probe.
+
+        Without this, the tests above could pass against a helper that
+        swallowed the probe entirely rather than merely untracing it.
+
+        The unavailability is forced rather than assumed. A bare
+        ``find_spec("opentelemetry")`` would be the wrong precondition —
+        ``opentelemetry`` (the API) arrives transitively here as a
+        namespace package while ``opentelemetry.instrumentation`` does
+        not, so asserting on the parent tests the wrong thing and couples
+        this control to whatever a transitive dependency happens to pull
+        in. Setting the module to ``None`` makes the import raise, which
+        is the condition the guarded import actually handles.
+        """
+        import sys
+
+        monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.utils", None)
+
+        config = _config(client_id="", client_secret="")
+        route = respx.head(config.base_url).mock(side_effect=httpx.ConnectError("refused"))
+
+        app = starlette_app_factory(config)
+        with TestClient(app) as http:
+            resp = http.get("/readyz")
+
+        assert route.called, "the probe was skipped, not merely untraced"
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "Looker base URL unreachable"

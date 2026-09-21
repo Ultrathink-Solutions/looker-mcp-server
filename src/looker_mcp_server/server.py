@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -27,6 +29,45 @@ logger = structlog.get_logger()
 #: resource's path to be appended as a suffix — see
 #: :func:`_well_known_prm_path`.
 PRM_PATH = "/.well-known/oauth-protected-resource"
+
+
+@contextmanager
+def _untraced_dependency_probe() -> Iterator[None]:
+    """Suppress OpenTelemetry auto-instrumentation inside the block.
+
+    A readiness probe reaches the Looker instance over HTTP. A kubelet calls
+    it on a fixed period and carries no inbound trace context, so in a
+    deployment that auto-instruments httpx every probe becomes a brand new
+    ROOT trace rather than a child of anything. At the usual
+    ``periodSeconds: 10`` that is roughly 8,600 traces per day from a single
+    replica, which on one real deployment reached 98% of the trace store and
+    buried the actual user traffic it existed to record.
+
+    This package depends on ``httpx`` and NOT on OpenTelemetry: the spans
+    being suppressed here are created by the embedding deployment, which
+    instruments httpx globally from outside this library. The suppression
+    therefore has to be requested through an API this package cannot assume
+    is installed — hence the guarded import, which degrades to a no-op when
+    OpenTelemetry is absent. Both the OpenTelemetry helper and logfire's
+    equivalent set the same context keys, so suppressing here covers either.
+
+    Only the probe's own outbound call is affected. Readiness is still
+    reported through the ``/readyz`` status code, which is the signal a
+    kubelet acts on and which a cluster already records as probe metrics and
+    events, so nothing observable about readiness is lost.
+    """
+    try:
+        # Not a dependency of this package — resolved only when the embedding
+        # deployment installs OpenTelemetry, which is also the only case where
+        # there is a span to suppress.
+        from opentelemetry.instrumentation.utils import (  # pyright: ignore[reportMissingImports]
+            suppress_instrumentation,
+        )
+    except Exception:
+        yield
+        return
+    with suppress_instrumentation():
+        yield
 
 
 def _well_known_prm_path(resource_uri: str) -> str:
@@ -349,16 +390,20 @@ def create_server(
         # ``looker_oauth`` is credential-free end-to-end: leftover API3 creds in
         # the environment must NOT turn readiness into a service-account login
         # check. Force the reachability path in that mode regardless of creds.
-        if (
-            config.mcp_mode != LookerMcpMode.LOOKER_OAUTH
-            and config.client_id
-            and config.client_secret
-        ):
-            ok = await client.check_connectivity()
-            reason = "Cannot connect to Looker"
-        else:
-            ok = await client.check_reachability()
-            reason = "Looker base URL unreachable"
+        # Both branches reach Looker over HTTP, and both are driven only by
+        # this probe — see :func:`_untraced_dependency_probe` for why the
+        # resulting spans are suppressed rather than kept.
+        with _untraced_dependency_probe():
+            if (
+                config.mcp_mode != LookerMcpMode.LOOKER_OAUTH
+                and config.client_id
+                and config.client_secret
+            ):
+                ok = await client.check_connectivity()
+                reason = "Cannot connect to Looker"
+            else:
+                ok = await client.check_reachability()
+                reason = "Looker base URL unreachable"
 
         if not ok:
             return JSONResponse(

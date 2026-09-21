@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `/readyz` no longer emits a trace for its own dependency check. The probe
+  reaches Looker over HTTP, and a kubelet calls it on a fixed period carrying
+  no inbound trace context — so in a deployment that auto-instruments `httpx`,
+  every probe became a new root trace. At the usual `periodSeconds: 10` that is
+  roughly 8,600 traces per day from a single replica; on one deployment it grew
+  to 98% of the trace store and buried the user traffic the store existed to
+  record. Both readiness shapes are covered (the service-account login cycle and
+  the no-auth reachability `HEAD`), since both reach Looker over HTTP.
+
+  This package does not depend on OpenTelemetry: the suppression is requested
+  through a guarded import and degrades to a no-op where OpenTelemetry is not
+  installed, which is also the only case where there is no span to suppress.
+  Readiness behaviour is unchanged — the probe still runs and `/readyz` still
+  reports its real result, which is the signal a kubelet acts on.
+
 ## [0.23.1] - 2026-08-18
 
 In `looker_oauth` mode, standard MCP clients could not complete the PKCE flow:
