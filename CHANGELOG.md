@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-17
+
 `get_explore` was the largest response in the default tool groups. It returned
 every field's SQL, pretty-printed, so one wide explore could fill an assistant's
 context before it queried anything. The query tools also offered arguments their
@@ -1275,7 +1277,8 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.2...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.2...v0.24.0
 [0.23.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.22.0...v0.23.0
