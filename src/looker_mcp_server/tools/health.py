@@ -22,7 +22,7 @@ def register_health_tools(server: FastMCP, client: LookerClient) -> None:
             "connections, datagroups (with how many are stale or recently triggered) "
             "and running queries. Use it to spot an instance-wide problem, such as stale "
             "datagroups or a pile-up of running queries. It does not test whether each "
-            "connection works or look for broken content; use validate_content for that."
+            "connection works or look for broken content."
         ),
     )
     async def health_pulse() -> str:

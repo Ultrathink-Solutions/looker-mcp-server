@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`search_content` searches content.** It called `GET /content_metadata_access`,
+  which lists the access grants of one content-metadata item and requires
+  `content_metadata_id`, so it has never returned search results. It now calls
+  Looker's Search Content endpoint, `GET /content/{terms}`, with the search text
+  percent-encoded as one path segment and the type filter sent as Looker's
+  `types`. The tool still returns a JSON array, now of Looker's content-search
+  items: each has a `content_id` and a `type`, and may also carry a title,
+  description, folder and view count when Looker returns them. A `look` item's
+  `content_id` is what `run_look` takes, and a `dashboard` or `lookml_dashboard`
+  item's is what `run_dashboard` takes.
+  Behaviour change: `types` is an enum of the three values Looker's search
+  accepts, `dashboard`, `look` and `lookml_dashboard`. Any other value, such as
+  `folder`, is refused when the call is validated; Looker's Search Content
+  endpoint returns no folders or explores. `include_hidden` is removed from
+  `search_content`: Looker's search results carry no hidden flag, so it never
+  filtered anything. Neither change can break a working call, because the tool
+  never returned search results before. A blank `query_string` fails before any
+  Looker request.
+
+### Changed
+
+- **`run_look` and `run_dashboard` name `search_content` as the way to find an
+  ID.** They named `list_looks` and `list_dashboards`, which are in the
+  `content` group, so a deployment that serves only the read-only groups
+  (`explore`, `query`, `schema`, `health`, `identity`) could not follow the
+  pointer. `health_pulse` no longer points at `validate_content`, also a
+  `content` tool. No other description in the default groups names a tool
+  outside its own group that the read-only groups do not serve, and a test now
+  checks that.
+- **`list_dimensions` and `list_measures` return compact JSON**, the same field
+  shape as `get_explore`'s default: no indentation or newlines, and empty values
+  dropped rather than sent as `null`. Each field's `hidden` flag appears only
+  with `include_hidden=True`, as a boolean.
+
 ## [0.24.0] - 2026-10-17
 
 `get_explore` was the largest response in the default tool groups. It returned

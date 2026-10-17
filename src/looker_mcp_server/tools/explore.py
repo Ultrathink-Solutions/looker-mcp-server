@@ -78,6 +78,24 @@ def _concise_fields(
     return result
 
 
+def _field_listing(explore: dict[str, Any], kind: str, *, include_hidden: bool) -> str:
+    """Render one kind of an explore's fields the way ``get_explore`` does by default.
+
+    Shared by ``list_dimensions`` and ``list_measures``: compact JSON with each
+    field's name, label, type and description, no SQL, and no empty values.
+    """
+    fields = (explore.get("fields") or {}).get(kind) or []
+    listing = _concise_fields(
+        fields,
+        include_hidden=include_hidden,
+        include_sql=False,
+        include_descriptions=True,
+        wanted_fields=None,
+        wanted_views=None,
+    )
+    return json.dumps(listing, separators=(",", ":"))
+
+
 def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
@@ -231,19 +249,7 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                     f"/lookml_models/{model_name}/explores/{explore_name}",
                     params={"fields": "fields"},
                 )
-                dims = [
-                    {
-                        "name": d.get("name"),
-                        "label": d.get("label"),
-                        "type": d.get("type"),
-                        "description": d.get("description"),
-                        "hidden": d.get("hidden"),
-                    }
-                    for d in _filter_hidden(
-                        explore.get("fields", {}).get("dimensions") or [], include_hidden
-                    )
-                ]
-                return json.dumps(dims, indent=2)
+                return _field_listing(explore, "dimensions", include_hidden=include_hidden)
         except Exception as e:
             return format_api_error("list_dimensions", e)
 
@@ -269,19 +275,7 @@ def register_explore_tools(server: FastMCP, client: LookerClient) -> None:
                     f"/lookml_models/{model_name}/explores/{explore_name}",
                     params={"fields": "fields"},
                 )
-                measures = [
-                    {
-                        "name": m.get("name"),
-                        "label": m.get("label"),
-                        "type": m.get("type"),
-                        "description": m.get("description"),
-                        "hidden": m.get("hidden"),
-                    }
-                    for m in _filter_hidden(
-                        explore.get("fields", {}).get("measures") or [], include_hidden
-                    )
-                ]
-                return json.dumps(measures, indent=2)
+                return _field_listing(explore, "measures", include_hidden=include_hidden)
         except Exception as e:
             return format_api_error("list_measures", e)
 

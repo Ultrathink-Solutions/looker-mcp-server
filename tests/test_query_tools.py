@@ -1,6 +1,7 @@
 """Tests for query tool group — semantic-layer queries with dev_mode + branch."""
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -695,55 +696,141 @@ class TestQueryUrl:
         assert "limit" not in body
 
 
-class TestSearchContentHiddenFiltering:
-    """``search_content`` drops results carrying a truthy ``hidden`` flag by
-    default; ``include_hidden=True`` passes the raw result set through.
-    Items with no ``hidden`` key are always kept (most content types do not
-    carry the flag)."""
+async def _call_search_content(config, args: dict) -> Any:
+    mcp, looker_client = create_server(config, enabled_groups={"query"})
+    try:
+        async with Client(mcp) as mcp_client:
+            result = await mcp_client.call_tool("search_content", args)
+            content = result.content[0]
+            assert isinstance(content, TextContent)
+            return json.loads(content.text)
+    finally:
+        await looker_client.close()
 
-    SEARCH_PAYLOAD = [
-        {"name": "Sales Dashboard", "type": "dashboard"},
-        {"name": "Staging Explore", "type": "explore", "hidden": True},
-        {"name": "Orders Explore", "type": "explore", "hidden": False},
-    ]
+
+# What Looker's Search Content endpoint returns: one ContentSearch item per
+# match, whose ``content_id`` is the ID that run_look or run_dashboard takes.
+CONTENT_SEARCH_RESULTS = [
+    {
+        "content_id": "17",
+        "type": "dashboard",
+        "title": "Revenue Overview",
+        "description": "Weekly revenue by region",
+        "folder_id": "5",
+        "folder_name": "Finance",
+        "view_count": 120,
+    },
+    {
+        "content_id": "42",
+        "type": "look",
+        "title": "Revenue by Region",
+        "folder_id": "5",
+        "folder_name": "Finance",
+        "view_count": 30,
+    },
+    {
+        "content_id": "ecommerce::revenue_pulse",
+        "type": "lookml_dashboard",
+        "title": "Revenue Pulse",
+        "view_count": 8,
+    },
+]
+
+
+def _path_without_query(request: httpx.Request) -> str:
+    # ``raw_path`` keeps the percent-encoding that ``url.path`` decodes.
+    return request.url.raw_path.split(b"?", 1)[0].decode("ascii")
+
+
+class TestSearchContentEndpoint:
+    """``search_content`` calls Looker's Search Content endpoint,
+    ``GET /content/{terms}``, with the search text as one path segment and
+    the type filter in Looker's ``types`` parameter."""
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_hidden_results_excluded_by_default(self, config):
+    async def test_terms_go_in_the_path_and_filters_in_the_query(self, config):
         _mock_login_logout()
-        respx.get(f"{API_URL}/content_metadata_access").mock(
-            return_value=httpx.Response(200, json=self.SEARCH_PAYLOAD)
+        route = respx.get(url__regex=rf"^{API_URL}/content/").mock(
+            return_value=httpx.Response(200, json=CONTENT_SEARCH_RESULTS)
         )
-        mcp, looker_client = create_server(config, enabled_groups={"query"})
-        try:
-            async with Client(mcp) as mcp_client:
-                result = await mcp_client.call_tool("search_content", {"query_string": "orders"})
-                content = result.content[0]
-                assert isinstance(content, TextContent)
-                payload = json.loads(content.text)
-        finally:
-            await looker_client.close()
-        assert [r["name"] for r in payload] == ["Sales Dashboard", "Orders Explore"]
+        payload = await _call_search_content(
+            config,
+            {"query_string": "revenue / margin", "types": ["look", "dashboard"], "limit": 5},
+        )
+
+        assert route.call_count == 1
+        request = route.calls.last.request
+        assert request.method == "GET"
+        # The slash is encoded, so the terms cannot become a sub-path.
+        assert _path_without_query(request) == "/api/4.0/content/revenue%20%2F%20margin"
+        assert dict(request.url.params) == {"types": "look,dashboard", "limit": "5"}
+        assert payload == CONTENT_SEARCH_RESULTS
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_include_hidden_returns_all(self, config):
+    async def test_default_call_searches_every_type(self, config):
         _mock_login_logout()
-        respx.get(f"{API_URL}/content_metadata_access").mock(
-            return_value=httpx.Response(200, json=self.SEARCH_PAYLOAD)
+        route = respx.get(url__regex=rf"^{API_URL}/content/").mock(
+            return_value=httpx.Response(200, json=CONTENT_SEARCH_RESULTS)
+        )
+        payload = await _call_search_content(config, {"query_string": "revenue"})
+
+        assert route.call_count == 1
+        request = route.calls.last.request
+        assert _path_without_query(request) == "/api/4.0/content/revenue"
+        assert dict(request.url.params) == {"limit": "20"}
+        # Every returned item keeps the ID and type a run tool needs.
+        assert [(r["content_id"], r["type"]) for r in payload] == [
+            ("17", "dashboard"),
+            ("42", "look"),
+            ("ecommerce::revenue_pulse", "lookml_dashboard"),
+        ]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_lookml_dashboard_type_is_accepted(self, config):
+        _mock_login_logout()
+        route = respx.get(url__regex=rf"^{API_URL}/content/").mock(
+            return_value=httpx.Response(200, json=CONTENT_SEARCH_RESULTS[2:])
+        )
+        await _call_search_content(config, {"query_string": "pulse", "types": ["lookml_dashboard"]})
+        assert route.calls.last.request.url.params["types"] == "lookml_dashboard"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize("content_type", ["folder", "explore", "dashboards"])
+    async def test_types_outside_lookers_search_are_refused(self, config, content_type):
+        _mock_login_logout()
+        route = respx.get(url__regex=rf"^{API_URL}/content/").mock(
+            return_value=httpx.Response(200, json=[])
         )
         mcp, looker_client = create_server(config, enabled_groups={"query"})
         try:
             async with Client(mcp) as mcp_client:
                 result = await mcp_client.call_tool(
-                    "search_content", {"query_string": "orders", "include_hidden": True}
+                    "search_content",
+                    {"query_string": "revenue", "types": [content_type]},
+                    raise_on_error=False,
                 )
-                content = result.content[0]
-                assert isinstance(content, TextContent)
-                payload = json.loads(content.text)
         finally:
             await looker_client.close()
-        assert len(payload) == 3
+
+        assert result.is_error
+        assert not route.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize("query_string", ["", "   "])
+    async def test_blank_terms_fail_before_any_looker_call(self, config, query_string):
+        _mock_login_logout()
+        route = respx.get(url__regex=rf"^{API_URL}/content").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        payload = await _call_search_content(config, {"query_string": query_string})
+
+        assert "error" in payload
+        assert not route.called
 
 
 class TestExploreLinkPassthrough:
