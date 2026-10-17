@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-10-17
+
 ### Fixed
 
 - **`search_content` searches content.** It called `GET /content_metadata_access`,
@@ -1313,7 +1315,8 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.1...HEAD
+[0.24.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.2...v0.24.0
 [0.23.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.0...v0.23.1
