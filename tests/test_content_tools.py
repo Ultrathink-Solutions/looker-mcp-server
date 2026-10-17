@@ -290,3 +290,224 @@ class TestLookmlDashboardDiscovery:
             result = await mcp_client.call_tool("list_lookml_dashboards", {})
 
         assert json.loads(_text(result)) == []
+
+
+class TestAddDashboardFilter:
+    """``add_dashboard_filter`` sends one of Looker's filter types to
+    ``POST /dashboard_filters``, with the model and explore a field filter needs."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_field_filter_posts_type_model_explore_and_dimension(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_filters").mock(
+            return_value=httpx.Response(200, json={"id": "f1", "title": "Region"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "add_dashboard_filter",
+                    {
+                        "dashboard_id": "17",
+                        "title": "Region",
+                        "dimension": "orders.region",
+                        "model": "ecommerce",
+                        "explore": "orders",
+                    },
+                )
+                payload = json.loads(_text(result))
+        finally:
+            await looker_client.close()
+
+        assert payload == {"id": "f1", "name": "region", "title": "Region"}
+        body = json.loads(route.calls.last.request.content)
+        assert body == {
+            "dashboard_id": "17",
+            "name": "region",
+            "title": "Region",
+            "dimension": "orders.region",
+            "type": "field",
+            "model": "ecommerce",
+            "explore": "orders",
+        }
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_field_filter_without_a_dimension_fails_before_any_request(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_filters").mock(
+            return_value=httpx.Response(200, json={"id": "f1"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "add_dashboard_filter",
+                    {
+                        "dashboard_id": "17",
+                        "title": "Region",
+                        "model": "ecommerce",
+                        "explore": "orders",
+                    },
+                )
+                payload = json.loads(_text(result))
+        finally:
+            await looker_client.close()
+
+        assert "dimension" in payload["error"]
+        assert not route.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_field_filter_without_model_and_explore_fails_before_any_request(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_filters").mock(
+            return_value=httpx.Response(200, json={"id": "f1"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "add_dashboard_filter",
+                    {"dashboard_id": "17", "title": "Region", "dimension": "orders.region"},
+                )
+                payload = json.loads(_text(result))
+        finally:
+            await looker_client.close()
+
+        assert "model" in payload["error"]
+        assert not route.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_date_filter_needs_no_dimension_model_or_explore(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_filters").mock(
+            return_value=httpx.Response(200, json={"id": "f2", "title": "Date"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                await mcp_client.call_tool(
+                    "add_dashboard_filter",
+                    {
+                        "dashboard_id": "17",
+                        "title": "Date",
+                        "type": "date",
+                        "default_value": "90 days",
+                    },
+                )
+        finally:
+            await looker_client.close()
+
+        body = json.loads(route.calls.last.request.content)
+        assert body == {
+            "dashboard_id": "17",
+            "name": "date",
+            "title": "Date",
+            "type": "date",
+            "default_value": "90 days",
+        }
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_filter_name_is_sent_as_given_or_derived_from_the_title(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_filters").mock(
+            return_value=httpx.Response(200, json={"id": "f3", "title": "Order Date (UTC)"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                derived = json.loads(
+                    _text(
+                        await mcp_client.call_tool(
+                            "add_dashboard_filter",
+                            {"dashboard_id": "17", "title": "Order Date (UTC)", "type": "date"},
+                        )
+                    )
+                )
+                derived_body = json.loads(route.calls.last.request.content)
+                given = json.loads(
+                    _text(
+                        await mcp_client.call_tool(
+                            "add_dashboard_filter",
+                            {
+                                "dashboard_id": "17",
+                                "title": "Order Date (UTC)",
+                                "name": "order_window",
+                                "type": "date",
+                            },
+                        )
+                    )
+                )
+                given_body = json.loads(route.calls.last.request.content)
+        finally:
+            await looker_client.close()
+
+        assert derived_body["name"] == "order_date_utc"
+        assert derived["name"] == "order_date_utc"
+        assert given_body["name"] == "order_window"
+        assert given["name"] == "order_window"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_unknown_filter_type_is_refused(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_filters").mock(
+            return_value=httpx.Response(200, json={"id": "f1"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "add_dashboard_filter",
+                    {
+                        "dashboard_id": "17",
+                        "title": "Region",
+                        "dimension": "orders.region",
+                        "type": "field_filter",
+                    },
+                    raise_on_error=False,
+                )
+        finally:
+            await looker_client.close()
+
+        assert result.is_error
+        assert not route.called
+
+
+class TestAddDashboardElement:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_posts_to_dashboard_elements_with_the_dashboard_in_the_body(self, config):
+        _mock_login_logout()
+        route = respx.post(f"{API_URL}/dashboard_elements").mock(
+            return_value=httpx.Response(200, json={"id": "e1", "title": "Revenue"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"content"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "add_dashboard_element",
+                    {"dashboard_id": "17", "title": "Revenue", "look_id": "42"},
+                )
+                payload = json.loads(_text(result))
+        finally:
+            await looker_client.close()
+
+        assert payload == {"id": "e1", "title": "Revenue"}
+        request = route.calls.last.request
+        assert request.method == "POST"
+        assert request.url.path == "/api/4.0/dashboard_elements"
+        body = json.loads(request.content)
+        assert body["dashboard_id"] == "17"
+        assert body["look_id"] == "42"

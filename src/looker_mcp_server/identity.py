@@ -216,6 +216,21 @@ class ArgumentSudoIdentityProvider:
         self._sudo_enabled = sudo_enabled
         self._email_to_id_cache: dict[str, str] = {}
 
+    @property
+    def argument_name(self) -> str:
+        """The tool argument this provider reads the impersonation target from."""
+        return self._argument_name
+
+    @property
+    def sudo_enabled(self) -> bool:
+        """Whether this provider performs per-call sudo.
+
+        When ``False``, :meth:`resolve` rejects every call that carries a
+        non-empty ``act_as_user`` argument, so a server must not offer that
+        argument.
+        """
+        return self._sudo_enabled
+
     async def resolve(self, context: RequestContext) -> LookerIdentity:
         raw = context.arguments.get(self._argument_name)
         if not raw:

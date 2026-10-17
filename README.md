@@ -148,6 +148,7 @@ All settings are configured via environment variables with the `LOOKER_` prefix,
 | `LOOKER_USER_TOKEN_HEADER` | `X-User-Token` | HTTP header carrying pre-exchanged OAuth token |
 | `LOOKER_TIMEOUT` | `60.0` | HTTP request timeout in seconds |
 | `LOOKER_MAX_ROWS` | `5000` | Default maximum rows for query tools |
+| `LOOKER_QUERY_DEV_PARAMS` | `false` | Offer `dev_mode`, `branch` and `project_id` on the query tools (`query`, `query_sql`, `query_url`, `run_query`, `run_look`). Off by default, so an assistant answering business questions is not offered developer arguments; turn it on for CI and LookML-validation callers. See [Dev Mode and Branch Validation](#dev-mode-and-branch-validation). |
 | `LOOKER_VERIFY_SSL` | `true` | Verify TLS certificates |
 | `LOOKER_LOG_LEVEL` | `INFO` | Logging level |
 | `LOOKER_MCP_MODE` | `dev` | `dev` (permissive), `public` (OAuth 2.1 resource-server, MCP 2025-11-25), or `looker_oauth` (Looker-as-authorization-server, opaque per-user tokens). See [MCP-Level Authentication](#mcp-level-authentication). |
@@ -236,7 +237,7 @@ The git tools accept an optional `act_as_user` argument so an admin can perform 
 
 **Security model.** The MCP forwards capability — it does not gate it. Sudo permission is enforced by Looker server-side: if the configured `LOOKER_CLIENT_ID` does not have sudo capability, `login_user` returns HTTP 403 and the tool fails. There is no MCP-side "who may impersonate whom" policy in the open-source server; layer one in via a wrapping `IdentityProvider` if you need it (see the next section).
 
-**Tool coverage.** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. The five query tools accept it too — `query`, `query_sql`, `query_url`, `run_query`, `run_look` — for the CI pattern where queries against a feature branch must run under a dedicated service user's dev workspace rather than the calling admin's. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
+**Tool coverage.** All eight git/workspace-scoped tools accept `act_as_user`: `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `create_git_branch`, `switch_git_branch`, `delete_git_branch`, `deploy_to_production`, `reset_to_production`. The five query tools accept it too — `query`, `query_sql`, `query_url`, `run_query`, `run_look` — for the CI pattern where queries against a feature branch must run under a dedicated service user's dev workspace rather than the calling admin's. The query tools offer it only where per-call sudo can run: admin credentials are configured, `LOOKER_SUDO_AS_USER=true`, and `LOOKER_MCP_MODE` is not `looker_oauth`. Elsewhere the argument is absent from their schemas, and a call that sends it is rejected. Project-level tools (deploy keys, connection diagnostics) deliberately do not — they don't depend on per-user dev workspace state.
 
 **Audit log.** Every argument-driven sudo emits an INFO-level structlog line:
 
@@ -259,12 +260,14 @@ This is independent of the trace-level `looker.session.sudo` debug line and is t
 
 - `act_as_user` is neither all-digits nor an email (no `@`) → validation error rejected up front, before any Looker call. Avoids forwarding garbage to `/login/{value}` where it would surface as an opaque HTTP 400.
 - Email does not match any Looker user → validation error. Fail-loud is deliberate; silently falling back to the configured identity would let a typo'd email run the action under the wrong user.
-- `LOOKER_SUDO_AS_USER=false` and `act_as_user` is passed → validation error explaining how to fix (enable sudo or remove the argument).
+- `LOOKER_SUDO_AS_USER=false` and `act_as_user` is passed → validation error explaining how to fix (enable sudo or remove the argument). The query tools do not offer the argument in that case, so a call that sends it is rejected as an unexpected argument.
 - Configured credentials lack sudo capability → Looker returns 403 on `login_user`, surfaced as `Permission denied — the current user lacks access.`
 
 ## Dev Mode and Branch Validation
 
 The query tools (`query`, `query_sql`, `query_url`, `run_query`, `run_look`) and the modeling/git tools accept three optional arguments — `dev_mode`, `branch`, and `project_id` — that together let you run operations against the LookML in a Looker dev workspace rather than production. This is what makes feature-branch validation possible from the MCP without falling back to raw REST.
+
+**The query tools offer these arguments only when `LOOKER_QUERY_DEV_PARAMS=true`.** They are off by default, because a caller answering business questions has no use for them. With the setting off, the arguments are absent from the query tools' schemas, and a call that sends one is rejected instead of silently running against production. The modeling and git tools always offer them.
 
 **How Looker scopes workspaces.** Workspace selection (production vs. dev) is a property of the API session token, not the call. The MCP issues `PATCH /session {"workspace_id": "dev"}` immediately after authentication when `dev_mode=True` is set; this affects every subsequent call routed through the same session. The setting does not persist across logins, so each MCP call sets it explicitly.
 
@@ -345,7 +348,7 @@ For parallel PR validation, provision multiple Looker users (e.g. `ci-bot-1`, `c
 | Tool group | Workspace-aware tools | Production-only tools |
 |---|---|---|
 | **git** | `switch_git_branch`, `create_git_branch`, `delete_git_branch`, `reset_to_production` (default `dev_mode=True`) | `get_git_branch`, `list_git_branches`, `get_git_branch_by_name`, `deploy_to_production` (read prod git state) |
-| **query** | `query`, `query_sql`, `query_url`, `run_query`, `run_look` (default `dev_mode=False`; opt in via `branch=` or `dev_mode=True`) | `run_dashboard`, `search_content` (production content) |
+| **query** | `query`, `query_sql`, `query_url`, `run_query`, `run_look` (offered with `LOOKER_QUERY_DEV_PARAMS=true`; default `dev_mode=False`; opt in via `branch=` or `dev_mode=True`) | `run_dashboard`, `search_content` (production content) |
 | **modeling — file ops** | `list_project_files`, `get_file` (default `dev_mode=True`), `create_file`, `update_file`, `delete_file` (always dev — Looker rejects writes to production) | — |
 | **modeling — validation** | `validate_project` (default `dev_mode=False`; opt in via `branch=` for PR validation) | — |
 | **modeling — data tests** | `list_lookml_tests`, `run_lookml_tests` (default `dev_mode=False`; opt in via `branch=` for PR data-regression checks) | — |
@@ -391,6 +394,8 @@ class MyIdentityProvider:
 config = LookerConfig()
 mcp, client = create_server(config, identity_provider=MyIdentityProvider())
 ```
+
+The query tools offer `act_as_user` only when the provider is an `ArgumentSudoIdentityProvider`. If your provider handles `act_as_user` itself, for example a policy wrapper around one, pass `query_act_as_user=True` to `create_server` to keep offering it. `query_act_as_user=True` raises `ValueError` when the provider cannot honour the argument: a built-in provider that never reads it, such as `ApiKeyIdentityProvider`, or, without a caller-supplied provider, a configuration such as `looker_oauth` mode.
 
 The `RequestContext` provides:
 - `headers` — HTTP request headers (empty in stdio mode)

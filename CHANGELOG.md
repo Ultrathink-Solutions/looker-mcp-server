@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`get_explore` was the largest response in the default tool groups. It returned
+every field's SQL, pretty-printed, so one wide explore could fill an assistant's
+context before it queried anything. The query tools also offered arguments their
+caller could not use. `get_explore` is now concise and filterable, `query`
+documents the filter syntax it takes, and the query tools leave out the developer
+and sudo arguments a deployment cannot honour.
+
+### Changed
+
+- **Behaviour change: `get_explore` returns a concise view by default.** Field
+  SQL is omitted unless `include_sql=True`, and the output is compact JSON with no
+  indentation or newlines. Empty values are dropped rather than sent as `null`,
+  and each field's `hidden` flag appears only with `include_hidden=True`, as a
+  boolean. Callers that read `sql` from `get_explore` must now pass
+  `include_sql=True`. On a synthetic 160-field explore the default response
+  shrinks from 43,390 to 22,331 characters.
+- **Behaviour change: the query tools' developer arguments are opt-in.**
+  `query`, `query_sql`, `query_url`, `run_query` and `run_look` offer `dev_mode`,
+  `branch` and `project_id` only when `LOOKER_QUERY_DEV_PARAMS=true`. Otherwise
+  the arguments are absent from the tool schemas, and a call that sends one is
+  rejected instead of silently running against production. Branch-validation
+  callers, such as CI jobs, must set the variable. The modeling and git groups
+  are unchanged.
+- **`act_as_user` on the query tools appears only where per-call sudo can run:**
+  admin credentials configured, `LOOKER_SUDO_AS_USER=true`, and a
+  `LOOKER_MCP_MODE` other than `looker_oauth`. For an identity provider passed to
+  `create_server`, the argument appears only when that provider is an
+  `ArgumentSudoIdentityProvider`; an embedder whose provider handles
+  `act_as_user` another way, such as a policy wrapper, passes
+  `query_act_as_user=True` to keep it. Elsewhere the argument is absent from
+  those tools' schemas, and a call that sends it is rejected. The git and
+  modeling tools still offer it, and still fail with a clear error when sudo is
+  off.
+- **Every tool description in the default groups is rewritten** (`explore`,
+  `query`, `schema`, `content`, `health`, `identity`). Each says what the tool
+  does and when to use it, which sibling to use instead, and what it does not
+  return, and every parameter states its format, an example and its default.
+  `query` documents Looker's filter-expression syntax (`"90 days"`, `">=100"`,
+  `"-NULL"`, `"foo,bar"`) and states that its `view` argument takes the explore
+  name.
+- **Behaviour change: `result_format` on `query`, `run_query` and `run_look` is
+  an enum** of `json`, `json_bi`, `json_detail`, `json_fe`, `csv`, `txt`, `html`,
+  `md` and `sql`. `xlsx`, `png` and `jpg` are now refused when the call is
+  validated, before any Looker request. They were forwarded before but never
+  worked on this path, which decodes the response as JSON or text; the render
+  group produces images.
+- **`health_analyze`'s `analysis_type` and `health_vacuum`'s `scope` are
+  enums** of the two values each tool handles. An unknown value is rejected when
+  the call is validated, instead of returning the tool's own error payload.
+- **Behaviour change: `add_dashboard_filter` uses Looker's documented filter
+  types.** `type` is an enum of `field` (the default), `date`, `number` and
+  `string`; the old `field_filter` and `date_filter` values, which Looker does
+  not accept, are refused when the call is validated. New `model` and `explore`
+  arguments carry what a `field` filter requires. `dimension` is now optional,
+  since only a `field` filter needs it, and a `field` filter without a
+  dimension, model and explore fails before any Looker request. Every filter is
+  now sent with the `name` Looker requires, which tiles use to listen to it: a
+  new `name` argument, or by default a slug of the title (`"Order Date (UTC)"`
+  becomes `order_date_utc`). The tool returns the name with the filter's ID and
+  title.
+
+### Fixed
+
+- **`add_dashboard_element` and `add_dashboard_filter` create through Looker's
+  documented endpoints**, `POST /dashboard_elements` and `POST /dashboard_filters`,
+  with the dashboard named in the body. They posted to the per-dashboard paths
+  (`/dashboards/{id}/dashboard_elements` and `/dashboards/{id}/dashboard_filters`),
+  which only list elements and filters, so neither could create anything.
+- **`list_columns` filters by table.** It sent `table_name`, which Looker's
+  columns endpoint does not document, so the response covered every table in
+  the schema. It now sends `table_names`.
+- **`result_format="html"` and `"md"` return the rendered text** on `query`,
+  `run_query` and `run_look`. They were decoded as JSON before, so every such
+  call failed.
+
+### Added
+
+- **`get_explore` filters.** `fields` returns only the named fields, `views`
+  only the fields of the named views, and `include_descriptions=False` drops
+  field descriptions. The filters combine, and they apply to dimensions,
+  measures, filter-only fields and parameters alike.
+- **`LOOKER_QUERY_DEV_PARAMS`** (default `false`) offers the query tools'
+  developer arguments.
+- **`create_server(query_act_as_user=...)`** overrides whether the query tools
+  offer `act_as_user`. `None`, the default, detects it as described above, and
+  `False` hides it. `True` offers it for a caller-supplied identity provider
+  that handles the argument. `True` raises `ValueError`, rather than letting a
+  call run as the wrong user, when the provider is a built-in one that never
+  reads the argument (`ApiKeyIdentityProvider`, `SudoIdentityProvider`,
+  `OAuthIdentityProvider`, `DualModeIdentityProvider`), when it is an
+  `ArgumentSudoIdentityProvider` with sudo disabled or one that reads a
+  different argument name, or, without a caller-supplied provider, wherever
+  the built-in provider cannot impersonate (`looker_oauth` mode, sudo off, or
+  no admin credentials). By default such an `ArgumentSudoIdentityProvider`
+  does not offer the argument either.
+- **`ArgumentSudoIdentityProvider.sudo_enabled` and `.argument_name`**,
+  read-only properties that report whether the provider performs per-call
+  sudo and which tool argument it reads the target from.
+
 ## [0.23.2] - 2026-09-21
 
 A readiness probe was drowning its own telemetry. `/readyz` verifies the Looker

@@ -14,13 +14,26 @@ from fastmcp import FastMCP
 
 from ..client import LookerClient, format_api_error
 
+ConnectionName = Annotated[
+    str,
+    "Name of the Looker database connection, for example 'warehouse'. "
+    "list_connections returns connection names.",
+]
+
 
 def register_schema_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
-        description="List all databases accessible through a Looker connection.",
+        description=(
+            "List the databases that a Looker connection can reach. Use it as the first "
+            "step when exploring the raw warehouse behind a connection; an empty list "
+            "means the connection's dialect has a single database, so go on to "
+            "list_schemas with the connection's default database. It returns database "
+            "names only. To answer a business question, query the semantic model with "
+            "query instead of reading raw tables."
+        ),
     )
     async def list_databases(
-        connection_name: Annotated[str, "Name of the Looker database connection"],
+        connection_name: ConnectionName,
     ) -> str:
         ctx = client.build_context("list_databases", "schema", {"connection_name": connection_name})
         try:
@@ -31,12 +44,18 @@ def register_schema_tools(server: FastMCP, client: LookerClient) -> None:
             return format_api_error("list_databases", e)
 
     @server.tool(
-        description="List schemas in a database accessible through a Looker connection.",
+        description=(
+            "List the schemas in a database that a Looker connection can reach. Use it "
+            "after list_databases to find where the raw tables live. It returns schema "
+            "names only; use list_tables for the tables in a schema."
+        ),
     )
     async def list_schemas(
-        connection_name: Annotated[str, "Name of the Looker database connection"],
+        connection_name: ConnectionName,
         database: Annotated[
-            str | None, "Database name (required for multi-database connections)"
+            str | None,
+            "Database name, for example 'analytics'. Required for a connection that "
+            "reaches more than one database. Default: the connection's database.",
         ] = None,
     ) -> str:
         ctx = client.build_context("list_schemas", "schema", {"connection_name": connection_name})
@@ -53,12 +72,22 @@ def register_schema_tools(server: FastMCP, client: LookerClient) -> None:
             return format_api_error("list_schemas", e)
 
     @server.tool(
-        description="List tables in a schema accessible through a Looker connection.",
+        description=(
+            "List the tables in a database schema that a Looker connection can reach. "
+            "Use it to see which raw tables a LookML model could be built on. It returns "
+            "table names, not columns or data; use list_columns for the columns."
+        ),
     )
     async def list_tables(
-        connection_name: Annotated[str, "Name of the Looker database connection"],
-        database: Annotated[str | None, "Database name"] = None,
-        schema_name: Annotated[str | None, "Schema name to filter tables"] = None,
+        connection_name: ConnectionName,
+        database: Annotated[
+            str | None,
+            "Database name, for example 'analytics'. Default: the connection's database.",
+        ] = None,
+        schema_name: Annotated[
+            str | None,
+            "Schema to list, for example 'public'. Default: every schema the connection can see.",
+        ] = None,
     ) -> str:
         ctx = client.build_context("list_tables", "schema", {"connection_name": connection_name})
         try:
@@ -75,15 +104,27 @@ def register_schema_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "List columns for specific tables in a Looker connection. "
-            "Returns column names, data types, and other metadata."
+            "List the columns of raw tables that a Looker connection can reach, with "
+            "each column's name and data type. Use it to check the warehouse columns "
+            "behind a LookML field. Name a table with table_name to keep the response "
+            "short; without it the response covers every table in the schema."
         ),
     )
     async def list_columns(
-        connection_name: Annotated[str, "Name of the Looker database connection"],
-        database: Annotated[str | None, "Database name"] = None,
-        schema_name: Annotated[str | None, "Schema name"] = None,
-        table_name: Annotated[str | None, "Table name to get columns for"] = None,
+        connection_name: ConnectionName,
+        database: Annotated[
+            str | None,
+            "Database name, for example 'analytics'. Default: the connection's database.",
+        ] = None,
+        schema_name: Annotated[
+            str | None,
+            "Schema of the tables, for example 'public'. Default: not set, which leaves "
+            "the choice of schema to Looker.",
+        ] = None,
+        table_name: Annotated[
+            str | None,
+            "Table to list columns for, for example 'orders'. Default: every table in the schema.",
+        ] = None,
     ) -> str:
         ctx = client.build_context("list_columns", "schema", {"connection_name": connection_name})
         try:
@@ -94,7 +135,9 @@ def register_schema_tools(server: FastMCP, client: LookerClient) -> None:
                 if schema_name:
                     params["schema_name"] = schema_name
                 if table_name:
-                    params["table_name"] = table_name
+                    # Looker's columns endpoint filters on ``table_names``, a
+                    # comma-separated list; one table is a list of one.
+                    params["table_names"] = table_name
                 columns = await session.get(
                     f"/connections/{connection_name}/columns", params=params
                 )

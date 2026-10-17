@@ -185,6 +185,17 @@ class LookerConfig(BaseSettings):
     max_rows: int = 5000
     """Default maximum rows returned by query tools."""
 
+    query_dev_params: bool = False
+    """Offer the developer arguments (``dev_mode``, ``branch``, ``project_id``)
+    on the query-group tools (``query``, ``query_sql``, ``query_url``,
+    ``run_query``, ``run_look``).
+
+    Off by default: those arguments only make sense for a caller that
+    validates in-progress LookML, such as a CI job, and an assistant answering
+    business questions should not be offered them. When off, the arguments are
+    absent from the tool schemas and a call that sends one is rejected. The
+    modeling and git groups keep their own branch arguments regardless."""
+
     log_level: str = "INFO"
 
     # ── MCP-level auth (who can talk to *this* server) ───────────────
