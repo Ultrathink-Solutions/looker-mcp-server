@@ -449,3 +449,48 @@ class TestGetExploreConciseView:
         )
         assert "\n" not in text
         assert json.loads(text)["name"] == "orders"
+
+
+class TestFieldListingsAreCompact:
+    """``list_dimensions`` and ``list_measures`` return the same compact field
+    shape as ``get_explore``'s default: no indentation, and no ``null`` values
+    for a field that lacks a description or a hidden flag."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("tool", "kind"), [("list_dimensions", "dimensions"), ("list_measures", "measures")]
+    )
+    async def test_listing_is_compact_json_without_nulls(self, config, tool, kind):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/lookml_models/ecommerce/explores/orders").mock(
+            return_value=httpx.Response(200, json=EXPLORE_PAYLOAD)
+        )
+        text = await _call_raw(config, tool, {"model_name": "ecommerce", "explore_name": "orders"})
+
+        assert "\n" not in text
+        payload = json.loads(text)
+        assert payload, tool
+        for field in payload:
+            assert None not in field.values(), field
+            assert {"name", "label", "type"} <= field.keys()
+        # Matches get_explore's default view of the same fields.
+        explore = await _call(
+            config, "get_explore", {"model_name": "ecommerce", "explore_name": "orders"}
+        )
+        assert payload == explore[kind]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("tool", "kind"), [("list_dimensions", "dimensions"), ("list_measures", "measures")]
+    )
+    async def test_listing_keeps_descriptions(self, config, tool, kind):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/lookml_models/ecommerce/explores/orders").mock(
+            return_value=httpx.Response(200, json=JOINED_EXPLORE_PAYLOAD)
+        )
+        payload = await _call(config, tool, {"model_name": "ecommerce", "explore_name": "orders"})
+        expected = {f["name"]: f["description"] for f in JOINED_EXPLORE_PAYLOAD["fields"][kind]}
+        assert {f["name"]: f.get("description") for f in payload} == expected
+        assert all("sql" not in f for f in payload)

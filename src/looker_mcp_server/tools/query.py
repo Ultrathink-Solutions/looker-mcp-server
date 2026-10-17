@@ -20,9 +20,8 @@ from ._helpers import (
     DevBranch,
     DevMode,
     DevProjectId,
-    IncludeHidden,
-    _filter_hidden,
     _maybe_use_branch,
+    _path_seg,
     _validate_branch_args,
     tool_with_hidden_args,
 )
@@ -133,6 +132,10 @@ ResultFormat = Annotated[
     "pivot and table-calculation metadata), 'json_detail' (an older form of json_bi), "
     "'json_fe', 'csv', 'txt', 'html', 'md', or 'sql' (the generated SQL instead of rows).",
 ]
+
+# The content types Looker's Search Content endpoint (``GET /content/{terms}``)
+# accepts in its ``types`` filter.
+ContentType = Literal["dashboard", "look", "lookml_dashboard"]
 
 
 def register_query_tools(
@@ -291,14 +294,16 @@ def register_query_tools(
         description=(
             "Run a saved Look by its ID and return its rows with the Look's title and "
             "links. Use it when a saved Look already answers the question; find Look "
-            "IDs with list_looks. The Look runs with its saved "
-            "fields and filters, so to change them build a new query with query "
-            "instead."
+            "IDs with search_content, whose 'look' results carry the ID as content_id. "
+            "The Look runs with its saved fields and filters, so to change them build "
+            "a new query with query instead."
         ),
     )
     async def run_look(
         look_id: Annotated[
-            str, "ID of the saved Look, for example '42'. list_looks returns Look IDs."
+            str,
+            "ID of the saved Look, for example '42'. search_content returns it as a "
+            "look's content_id.",
         ],
         result_format: ResultFormat = "json",
         limit: QueryLimit = 500,
@@ -420,16 +425,18 @@ def register_query_tools(
         description=(
             "Run every tile on a dashboard and return the dashboard's details with "
             "each tile's title, query and rows. Use it when the question is about a "
-            "whole dashboard; find dashboard IDs with list_dashboards. The response "
-            "carries every tile's data and can be "
-            "large, so for a single tile use run_query with that tile's query ID. A "
-            "tile whose query fails reports an error instead of rows."
+            "whole dashboard; find dashboard IDs with search_content, whose 'dashboard' "
+            "and 'lookml_dashboard' results carry the ID as content_id. The response "
+            "carries every tile's data and can be large, so for a single tile use "
+            "run_query with that tile's query ID. A tile whose query fails reports an "
+            "error instead of rows."
         ),
     )
     async def run_dashboard(
         dashboard_id: Annotated[
             str,
-            "ID of the dashboard, for example '17'. list_dashboards returns dashboard IDs.",
+            "ID of the dashboard, for example '17', or 'model::slug' for a LookML "
+            "dashboard. search_content returns it as a dashboard's content_id.",
         ],
     ) -> str:
         ctx = client.build_context("run_dashboard", "query", {"dashboard_id": dashboard_id})
@@ -533,31 +540,36 @@ def register_query_tools(
 
     @tool(
         description=(
-            "Search saved Looker content, such as dashboards, Looks and folders, by "
-            "text, and return the matching items with their IDs. Use it to find "
-            "existing content about a topic before running it with run_look or "
-            "run_dashboard. It matches content metadata, not the data inside the "
-            "content, and leaves out hidden items unless include_hidden is true."
+            "Search saved Looks, dashboards and LookML dashboards by text and return "
+            "the closest matches, each with its content_id and type, plus its title "
+            "and folder when Looker returns them. "
+            "Use it to find existing content about a topic, then pass a "
+            "'look' result's content_id to run_look and a 'dashboard' or "
+            "'lookml_dashboard' result's content_id to run_dashboard. It matches "
+            "titles and descriptions, not the data inside the content, and does not "
+            "return folders or explores."
         ),
     )
     async def search_content(
         query_string: Annotated[str, "Text to search for, for example 'revenue'."],
         types: Annotated[
-            list[str] | None,
-            "Content types to include, for example ['dashboard', 'look']. Default: all types.",
+            list[ContentType] | None,
+            "Content types to include: 'dashboard', 'look' or 'lookml_dashboard', for "
+            "example ['dashboard', 'look']. Default: all three.",
         ] = None,
         limit: Annotated[int, "Maximum results to return, for example 10. Default 20."] = 20,
-        include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context("search_content", "query", {"query_string": query_string})
         try:
+            if not query_string.strip():
+                raise ValueError("query_string must contain text to search for.")
             async with client.session(ctx) as session:
-                params: dict[str, Any] = {"terms": query_string, "limit": limit}
+                # Looker's Search Content endpoint takes the terms as a path
+                # segment, so they are percent-encoded (a '/' included).
+                params: dict[str, Any] = {"limit": limit}
                 if types:
                     params["types"] = ",".join(types)
-                results = await session.get("/content_metadata_access", params=params)
-                if isinstance(results, list):
-                    results = _filter_hidden(results, include_hidden)
+                results = await session.get(f"/content/{_path_seg(query_string)}", params=params)
                 return json.dumps(results, indent=2)
         except Exception as e:
             return format_api_error("search_content", e)
