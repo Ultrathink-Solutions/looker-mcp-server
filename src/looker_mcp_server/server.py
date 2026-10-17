@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -18,7 +19,9 @@ from .identity import (
     DualModeIdentityProvider,
     IdentityProvider,
     OAuthIdentityProvider,
+    SudoIdentityProvider,
 )
+from .tools._helpers import ACT_AS_USER_ARG
 
 logger = structlog.get_logger()
 
@@ -29,6 +32,16 @@ logger = structlog.get_logger()
 #: resource's path to be appended as a suffix — see
 #: :func:`_well_known_prm_path`.
 PRM_PATH = "/.well-known/oauth-protected-resource"
+
+#: The built-in identity providers that never read the ``act_as_user`` tool
+#: argument. Matched by exact type, so a subclass that adds handling for the
+#: argument is not caught.
+_PROVIDERS_IGNORING_ACT_AS_USER = (
+    ApiKeyIdentityProvider,
+    SudoIdentityProvider,
+    OAuthIdentityProvider,
+    DualModeIdentityProvider,
+)
 
 
 @contextmanager
@@ -111,6 +124,7 @@ def create_server(
     identity_provider: IdentityProvider | None = None,
     enabled_groups: set[str] | None = None,
     auth: Any = None,
+    query_act_as_user: bool | None = None,
 ) -> tuple[FastMCP, LookerClient]:
     """Create a configured Looker MCP server.
 
@@ -132,6 +146,22 @@ def create_server(
         Set of tool group names to enable.  Defaults to ``DEFAULT_GROUPS``.
     auth:
         FastMCP-compatible auth callback (e.g. bearer token verifier).
+    query_act_as_user:
+        Whether the query tools offer the ``act_as_user`` argument. ``None``
+        (the default) detects it: the argument is offered only when the
+        resolved identity provider is an ``ArgumentSudoIdentityProvider``,
+        ``sudo_as_user`` is on, and the mode is not ``looker_oauth``. A
+        caller-supplied provider that handles ``act_as_user`` some other way,
+        for example a policy wrapper around an ``ArgumentSudoIdentityProvider``,
+        passes ``True`` to keep offering it. ``True`` raises ``ValueError``
+        when the provider cannot honour the argument: a built-in provider
+        that never reads it (``ApiKeyIdentityProvider``,
+        ``SudoIdentityProvider``, ``OAuthIdentityProvider``,
+        ``DualModeIdentityProvider``), an ``ArgumentSudoIdentityProvider``
+        whose ``sudo_enabled`` is false or whose ``argument_name`` is not
+        ``act_as_user``, or, without a caller-supplied
+        provider, a configuration whose built-in provider cannot impersonate
+        (for example ``looker_oauth`` mode). ``False`` hides it regardless.
 
     Returns
     -------
@@ -197,6 +227,69 @@ def create_server(
                 sudo_enabled=config.sudo_as_user,
             )
 
+    # The query tools offer only the arguments this deployment can honour.
+    # Per-call sudo (``act_as_user``) runs only through the argument-sudo
+    # wrapper, only while sudo is switched on, and never in the looker_oauth
+    # posture, which holds no admin credentials by design. A caller that owns
+    # its identity chain can say so explicitly with ``query_act_as_user``.
+    # The developer arguments are opt-in (``LOOKER_QUERY_DEV_PARAMS``).
+    argument_sudo_disabled = (
+        isinstance(identity_provider, ArgumentSudoIdentityProvider)
+        and not identity_provider.sudo_enabled
+    )
+    # An argument-sudo provider configured to read a different argument never
+    # sees ``act_as_user``, so a call that sends it would fall through to the
+    # inner identity.
+    act_as_user_honoured = (
+        config.mcp_mode != LookerMcpMode.LOOKER_OAUTH
+        and config.sudo_as_user
+        and isinstance(identity_provider, ArgumentSudoIdentityProvider)
+        and identity_provider.sudo_enabled
+        and identity_provider.argument_name == ACT_AS_USER_ARG
+    )
+    if query_act_as_user is None:
+        act_as_user_available = act_as_user_honoured
+    elif query_act_as_user:
+        # Offering an argument the provider cannot honour would let a call
+        # run as the wrong user (a provider that ignores it) or fail every
+        # call that sends it (sudo off). Refuse the setup instead.
+        if type(identity_provider) in _PROVIDERS_IGNORING_ACT_AS_USER:
+            raise ValueError(
+                f"query_act_as_user=True, but the identity provider "
+                f"({type(identity_provider).__name__}) ignores act_as_user, so a call "
+                "would run as the provider's identity instead of the requested user. "
+                "Pass an identity_provider that handles act_as_user, or leave "
+                "query_act_as_user unset."
+            )
+        if (
+            isinstance(identity_provider, ArgumentSudoIdentityProvider)
+            and identity_provider.argument_name != ACT_AS_USER_ARG
+        ):
+            raise ValueError(
+                "query_act_as_user=True, but the ArgumentSudoIdentityProvider reads "
+                f"its target from {identity_provider.argument_name!r}, not "
+                f"{ACT_AS_USER_ARG!r}, so a call that sends {ACT_AS_USER_ARG} would run "
+                "as the inner identity. Configure the provider with "
+                f"argument_name={ACT_AS_USER_ARG!r}, or leave query_act_as_user unset."
+            )
+        if argument_sudo_disabled:
+            raise ValueError(
+                "query_act_as_user=True, but the ArgumentSudoIdentityProvider has sudo "
+                "disabled, so it rejects every call that sends act_as_user. Enable sudo "
+                "on the provider, or leave query_act_as_user unset."
+            )
+        if not caller_provided_provider and not act_as_user_honoured:
+            raise ValueError(
+                "query_act_as_user=True needs an identity provider that honours "
+                "act_as_user, and the built-in provider for this configuration does "
+                "not: it requires LOOKER_SUDO_AS_USER=true, admin credentials, and a "
+                "LOOKER_MCP_MODE other than looker_oauth. Pass an identity_provider "
+                "that handles act_as_user, or leave query_act_as_user unset."
+            )
+        act_as_user_available = True
+    else:
+        act_as_user_available = False
+
     client = LookerClient(config, identity_provider)
 
     # Wire the user-lookup function for sudo after the client is ready.
@@ -257,7 +350,11 @@ def create_server(
 
     _group_registry: dict[str, Any] = {
         "explore": register_explore_tools,
-        "query": register_query_tools,
+        "query": functools.partial(
+            register_query_tools,
+            dev_params=config.query_dev_params,
+            act_as_user=act_as_user_available,
+        ),
         "render": register_render_tools,
         "schema": register_schema_tools,
         "content": register_content_tools,

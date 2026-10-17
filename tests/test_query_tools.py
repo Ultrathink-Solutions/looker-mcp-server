@@ -9,16 +9,38 @@ from fastmcp import Client
 from mcp.types import TextContent
 
 from looker_mcp_server.config import LookerConfig
+from looker_mcp_server.identity import (
+    ApiKeyIdentityProvider,
+    ArgumentSudoIdentityProvider,
+    LookerIdentity,
+    RequestContext,
+)
 from looker_mcp_server.server import create_server
 
 
 @pytest.fixture
 def config():
+    # ``query_dev_params`` is pinned so a LOOKER_QUERY_DEV_PARAMS in the
+    # environment cannot change which arguments the tests see.
     return LookerConfig(
         base_url="https://test.looker.com",
         client_id="test-id",
         client_secret="test-secret",
         sudo_as_user=False,
+        query_dev_params=False,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+
+@pytest.fixture
+def dev_config():
+    """Config for the developer flows: dev workspace and branch swap enabled."""
+    return LookerConfig(
+        base_url="https://test.looker.com",
+        client_id="test-id",
+        client_secret="test-secret",
+        sudo_as_user=False,
+        query_dev_params=True,
         _env_file=None,  # type: ignore[call-arg]
     )
 
@@ -40,7 +62,7 @@ class TestQueryWithBranch:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_branch_arg_drives_save_swap_run_restore(self, config):
+    async def test_branch_arg_drives_save_swap_run_restore(self, dev_config):
         _mock_login_logout()
         # dev_mode is auto-implied by branch=
         patch_session = respx.patch(f"{API_URL}/session").mock(
@@ -59,7 +81,7 @@ class TestQueryWithBranch:
             return_value=httpx.Response(200, json=[{"orders.region": "west"}])
         )
 
-        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        mcp, looker_client = create_server(dev_config, enabled_groups={"query"})
         try:
             async with Client(mcp) as mcp_client:
                 result = await mcp_client.call_tool(
@@ -111,7 +133,7 @@ class TestQueryWithBranch:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_branch_without_project_id_returns_clean_validation_error(self, config):
+    async def test_branch_without_project_id_returns_clean_validation_error(self, dev_config):
         _mock_login_logout()
         # Mock both endpoints we expect NOT to be called — the validation
         # must short-circuit before any session/query API side effects.
@@ -122,7 +144,7 @@ class TestQueryWithBranch:
             return_value=httpx.Response(201, json={"id": "q1"})
         )
 
-        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        mcp, looker_client = create_server(dev_config, enabled_groups={"query"})
         try:
             async with Client(mcp) as mcp_client:
                 result = await mcp_client.call_tool(
@@ -152,7 +174,7 @@ class TestQueryWithBranch:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_dev_mode_without_branch_skips_swap_logic(self, config):
+    async def test_dev_mode_without_branch_skips_swap_logic(self, dev_config):
         _mock_login_logout()
         patch_session = respx.patch(f"{API_URL}/session").mock(
             return_value=httpx.Response(200, json={"workspace_id": "dev"})
@@ -165,7 +187,7 @@ class TestQueryWithBranch:
             return_value=httpx.Response(200, json=[{"orders.region": "west"}])
         )
 
-        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        mcp, looker_client = create_server(dev_config, enabled_groups={"query"})
         try:
             async with Client(mcp) as mcp_client:
                 await mcp_client.call_tool(
@@ -390,7 +412,7 @@ class TestRunQuery:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_branch_arg_drives_save_swap_run_restore(self, config):
+    async def test_branch_arg_drives_save_swap_run_restore(self, dev_config):
         """Mirrors the ``query(branch=…)`` atomicity test — run_query must
         share the same swap → run → restore sequence."""
         _mock_login_logout()
@@ -408,7 +430,7 @@ class TestRunQuery:
             return_value=httpx.Response(200, json=[{"orders.region": "west"}])
         )
 
-        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        mcp, looker_client = create_server(dev_config, enabled_groups={"query"})
         try:
             async with Client(mcp) as mcp_client:
                 await mcp_client.call_tool(
@@ -450,7 +472,7 @@ class TestRunQuery:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_branch_without_project_id_returns_clean_validation_error(self, config):
+    async def test_branch_without_project_id_returns_clean_validation_error(self, dev_config):
         _mock_login_logout()
         patch_session = respx.patch(f"{API_URL}/session").mock(
             return_value=httpx.Response(200, json={"workspace_id": "dev"})
@@ -459,7 +481,7 @@ class TestRunQuery:
             return_value=httpx.Response(200, json=[])
         )
 
-        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        mcp, looker_client = create_server(dev_config, enabled_groups={"query"})
         try:
             async with Client(mcp) as mcp_client:
                 result = await mcp_client.call_tool(
@@ -960,3 +982,461 @@ class TestExploreLinkPassthrough:
         assert payload["format"] == "csv"
         assert payload["data"] == csv_body
         assert payload["look"] == look_obj
+
+
+# ── Which parameters the query tools expose ──────────────────────────
+# Developer parameters (dev workspace + branch swap) are opt-in, and the
+# per-call sudo argument appears only where sudo can actually run.
+
+DEV_PARAMS = {"dev_mode", "branch", "project_id"}
+TOOLS_WITH_DEV_AND_SUDO_PARAMS = ["query", "query_sql", "query_url", "run_look", "run_query"]
+
+
+def _make_config(**overrides) -> LookerConfig:
+    settings = {
+        "base_url": "https://test.looker.com",
+        "client_id": "test-id",
+        "client_secret": "test-secret",
+        "sudo_as_user": False,
+        "query_dev_params": False,
+        **overrides,
+    }
+    return LookerConfig(_env_file=None, **settings)  # type: ignore[call-arg]
+
+
+class _ImpersonatingProvider:
+    """A caller-supplied provider that handles ``act_as_user`` itself, as a
+    policy wrapper around argument sudo would."""
+
+    async def resolve(self, context: RequestContext) -> LookerIdentity:
+        return LookerIdentity(mode="api_key", client_id="test-id", client_secret="test-secret")
+
+
+async def _input_properties(config: LookerConfig, **server_kwargs) -> dict[str, set[str]]:
+    mcp, looker_client = create_server(config, enabled_groups={"query"}, **server_kwargs)
+    try:
+        async with Client(mcp) as mcp_client:
+            tools = await mcp_client.list_tools()
+            return {t.name: set((t.inputSchema.get("properties") or {}).keys()) for t in tools}
+    finally:
+        await looker_client.close()
+
+
+class TestQueryToolParameters:
+    @pytest.mark.asyncio
+    async def test_query_schema_hides_dev_params_by_default(self, config):
+        props = await _input_properties(config)
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert not props[tool] & DEV_PARAMS, tool
+        assert {"model", "view", "fields", "filters", "sorts", "limit"} <= props["query"]
+
+    @pytest.mark.asyncio
+    async def test_query_schema_shows_dev_params_when_enabled(self):
+        props = await _input_properties(_make_config(query_dev_params=True))
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert DEV_PARAMS <= props[tool], tool
+
+    def test_query_dev_params_setting_reads_the_environment(self, monkeypatch):
+        monkeypatch.delenv("LOOKER_QUERY_DEV_PARAMS", raising=False)
+        assert LookerConfig(_env_file=None).query_dev_params is False  # type: ignore[call-arg]
+        monkeypatch.setenv("LOOKER_QUERY_DEV_PARAMS", "true")
+        assert LookerConfig(_env_file=None).query_dev_params is True  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_query_schema_hides_act_as_user_in_oauth_mode(self):
+        # Admin credentials and sudo are both present, yet the looker_oauth
+        # posture never impersonates, so the argument must not be offered.
+        props = await _input_properties(
+            _make_config(
+                mcp_mode="looker_oauth",
+                mcp_resource_uri="https://mcp.example.com/mcp",
+                sudo_as_user=True,
+            )
+        )
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in props[tool], tool
+
+    @pytest.mark.asyncio
+    async def test_query_schema_hides_act_as_user_when_sudo_is_disabled(self, config):
+        props = await _input_properties(config)
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in props[tool], tool
+
+    @pytest.mark.asyncio
+    async def test_query_schema_shows_act_as_user_when_sudo_is_enabled(self):
+        props = await _input_properties(_make_config(sudo_as_user=True))
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" in props[tool], tool
+
+    @pytest.mark.asyncio
+    async def test_query_schema_hides_act_as_user_without_admin_credentials(self):
+        # Sudo is on, but with no admin credentials there is nothing to
+        # impersonate with, so the argument would be silently ignored.
+        props = await _input_properties(
+            _make_config(sudo_as_user=True, client_id="", client_secret="")
+        )
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in props[tool], tool
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_provider_hides_act_as_user_unless_opted_in(self):
+        config = _make_config(sudo_as_user=True)
+        provider = _ImpersonatingProvider()
+
+        detected = await _input_properties(config, identity_provider=provider)
+        opted_in = await _input_properties(
+            config, identity_provider=provider, query_act_as_user=True
+        )
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in detected[tool], tool
+            assert "act_as_user" in opted_in[tool], tool
+
+    @pytest.mark.parametrize("caller_supplied", [True, False], ids=["caller_supplied", "built_in"])
+    def test_argument_sudo_with_sudo_disabled_never_offers_act_as_user(self, caller_supplied):
+        # Its resolve() rejects every call that sends act_as_user, so the
+        # default hides the argument and an explicit opt-in is refused. The
+        # built-in case gets its sudo-disabled wrapper from
+        # LOOKER_SUDO_AS_USER=false; the caller-supplied one is built that way
+        # while the config itself has sudo on.
+        config = _make_config(sudo_as_user=caller_supplied)
+        kwargs = {}
+        if caller_supplied:
+            kwargs["identity_provider"] = ArgumentSudoIdentityProvider(
+                inner=ApiKeyIdentityProvider("test-id", "test-secret"),
+                client_id="test-id",
+                client_secret="test-secret",
+                sudo_enabled=False,
+            )
+        with pytest.raises(ValueError, match="query_act_as_user"):
+            create_server(config, enabled_groups={"query"}, query_act_as_user=True, **kwargs)
+
+    @pytest.mark.asyncio
+    async def test_argument_sudo_reading_another_argument_does_not_offer_act_as_user(self):
+        provider = ArgumentSudoIdentityProvider(
+            inner=ApiKeyIdentityProvider("test-id", "test-secret"),
+            client_id="test-id",
+            client_secret="test-secret",
+            argument_name="impersonate",
+        )
+        props = await _input_properties(_make_config(sudo_as_user=True), identity_provider=provider)
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in props[tool], tool
+
+    def test_query_act_as_user_true_is_refused_for_argument_sudo_reading_another_argument(
+        self,
+    ):
+        provider = ArgumentSudoIdentityProvider(
+            inner=ApiKeyIdentityProvider("test-id", "test-secret"),
+            client_id="test-id",
+            client_secret="test-secret",
+            argument_name="impersonate",
+        )
+        with pytest.raises(ValueError, match="impersonate"):
+            create_server(
+                _make_config(sudo_as_user=True),
+                identity_provider=provider,
+                enabled_groups={"query"},
+                query_act_as_user=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_argument_sudo_with_sudo_disabled_hides_act_as_user(self):
+        provider = ArgumentSudoIdentityProvider(
+            inner=ApiKeyIdentityProvider("test-id", "test-secret"),
+            client_id="test-id",
+            client_secret="test-secret",
+            sudo_enabled=False,
+        )
+        props = await _input_properties(_make_config(sudo_as_user=True), identity_provider=provider)
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in props[tool], tool
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_with_act_as_user_runs_as_the_requested_user(self):
+        # End to end through the built-in argument-sudo provider: the admin
+        # logs in, impersonates user 42, and the query runs on 42's token.
+        respx.post(f"{API_URL}/login").mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        sudo_route = respx.post(f"{API_URL}/login/42").mock(
+            return_value=httpx.Response(200, json={"access_token": "user-42-tok"})
+        )
+        respx.delete(f"{API_URL}/logout").mock(return_value=httpx.Response(204))
+        create_route = respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(201, json={"id": "q1"})
+        )
+        run_route = respx.get(f"{API_URL}/queries/q1/run/json").mock(
+            return_value=httpx.Response(200, json=[{"orders.region": "west"}])
+        )
+
+        mcp, looker_client = create_server(
+            _make_config(sudo_as_user=True), enabled_groups={"query"}
+        )
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                        "act_as_user": "42",
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert payload["row_count"] == 1
+        assert sudo_route.called
+        assert create_route.calls.last.request.headers["Authorization"] == "token user-42-tok"
+        assert run_route.calls.last.request.headers["Authorization"] == "token user-42-tok"
+
+    def test_query_act_as_user_true_is_refused_for_a_provider_that_ignores_it(self):
+        # ApiKeyIdentityProvider never reads act_as_user, so offering the
+        # argument would run every call as the API-key identity.
+        with pytest.raises(ValueError, match="ignores act_as_user"):
+            create_server(
+                _make_config(sudo_as_user=True),
+                identity_provider=ApiKeyIdentityProvider("test-id", "test-secret"),
+                enabled_groups={"query"},
+                query_act_as_user=True,
+            )
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param(
+                {"mcp_mode": "looker_oauth", "mcp_resource_uri": "https://mcp.example.com/mcp"},
+                id="looker_oauth",
+            ),
+            pytest.param({"client_id": "", "client_secret": ""}, id="no_admin_credentials"),
+            pytest.param({"sudo_as_user": False}, id="sudo_off"),
+        ],
+    )
+    def test_query_act_as_user_true_is_refused_when_the_builtin_provider_cannot_honour_it(
+        self, overrides
+    ):
+        config = _make_config(**{"sudo_as_user": True, **overrides})
+        with pytest.raises(ValueError, match="query_act_as_user"):
+            create_server(config, enabled_groups={"query"}, query_act_as_user=True)
+
+    @pytest.mark.asyncio
+    async def test_query_act_as_user_true_is_honoured_for_a_caller_supplied_provider_in_oauth_mode(
+        self,
+    ):
+        # The caller owns the identity chain, so its explicit opt-in stands.
+        config = _make_config(
+            mcp_mode="looker_oauth", mcp_resource_uri="https://mcp.example.com/mcp"
+        )
+        props = await _input_properties(
+            config,
+            identity_provider=_ImpersonatingProvider(),
+            query_act_as_user=True,
+        )
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" in props[tool], tool
+
+    @pytest.mark.asyncio
+    async def test_query_act_as_user_false_hides_it_even_when_sudo_can_run(self):
+        props = await _input_properties(_make_config(sudo_as_user=True), query_act_as_user=False)
+        for tool in TOOLS_WITH_DEV_AND_SUDO_PARAMS:
+            assert "act_as_user" not in props[tool], tool
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_hidden_dev_param_is_rejected_not_ignored(self, config):
+        # A caller that sends a hidden parameter anyway must get an error,
+        # never a silent production run that ignores what it asked for.
+        _mock_login_logout()
+        patch_session = respx.patch(f"{API_URL}/session").mock(
+            return_value=httpx.Response(200, json={"workspace_id": "dev"})
+        )
+        create_query = respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(201, json={"id": "q1"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                        "dev_mode": True,
+                    },
+                    raise_on_error=False,
+                )
+        finally:
+            await looker_client.close()
+
+        assert result.is_error
+        assert not patch_session.called
+        assert not create_query.called
+
+
+class TestResultFormats:
+    """Every format that works on the run path stays accepted: JSON formats are
+    parsed, text formats come back verbatim, and only the binary formats this
+    path cannot return are refused before any Looker call."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_json_bi_runs_the_json_bi_endpoint_and_parses_it(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/queries").mock(return_value=httpx.Response(201, json={"id": "q1"}))
+        json_bi = {
+            "metadata": {"fields": {"dimensions": [{"name": "orders.region"}]}},
+            "rows": [{"orders.region": {"value": "west"}}],
+        }
+        run_route = respx.get(f"{API_URL}/queries/q1/run/json_bi").mock(
+            return_value=httpx.Response(200, json=json_bi)
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                        "result_format": "json_bi",
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert run_route.called
+        assert payload["data"] == json_bi
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_sql_format_returns_the_generated_sql_as_text(self, config):
+        _mock_login_logout()
+        respx.post(f"{API_URL}/queries").mock(return_value=httpx.Response(201, json={"id": "q1"}))
+        sql = "SELECT region FROM orders GROUP BY 1"
+        run_route = respx.get(f"{API_URL}/queries/q1/run/sql").mock(
+            return_value=httpx.Response(200, text=sql, headers={"content-type": "text/plain"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                        "result_format": "sql",
+                    },
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert run_route.called
+        assert payload["format"] == "sql"
+        assert payload["data"] == sql
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("result_format", "body", "content_type"),
+        [
+            ("sql", "SELECT 1", "text/plain"),
+            ("html", "<table><tr><td>west</td></tr></table>", "text/html"),
+            ("md", "| orders.region |\n|---|\n| west |", "text/markdown"),
+        ],
+    )
+    async def test_run_query_text_formats_come_back_verbatim(
+        self, config, result_format, body, content_type
+    ):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/queries/q1").mock(return_value=httpx.Response(200, json={"id": "q1"}))
+        run_route = respx.get(f"{API_URL}/queries/q1/run/{result_format}").mock(
+            return_value=httpx.Response(200, text=body, headers={"content-type": content_type})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "run_query", {"query_id": "q1", "result_format": result_format}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert run_route.called
+        assert payload["format"] == result_format
+        assert payload["data"] == body
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_run_look_json_bi_runs_the_json_bi_endpoint(self, config):
+        _mock_login_logout()
+        respx.get(f"{API_URL}/looks/42").mock(
+            return_value=httpx.Response(200, json={"id": "42", "title": "Revenue"})
+        )
+        json_bi = {"metadata": {}, "rows": [{"orders.region": {"value": "west"}}]}
+        run_route = respx.get(f"{API_URL}/looks/42/run/json_bi").mock(
+            return_value=httpx.Response(200, json=json_bi)
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "run_look", {"look_id": "42", "result_format": "json_bi"}
+                )
+                content = result.content[0]
+                assert isinstance(content, TextContent)
+                payload = json.loads(content.text)
+        finally:
+            await looker_client.close()
+
+        assert run_route.called
+        assert payload["data"] == json_bi
+
+    @pytest.mark.asyncio
+    @respx.mock
+    @pytest.mark.parametrize("result_format", ["xlsx", "png", "jpg"])
+    async def test_binary_formats_are_refused_before_any_looker_call(self, config, result_format):
+        _mock_login_logout()
+        create_query = respx.post(f"{API_URL}/queries").mock(
+            return_value=httpx.Response(201, json={"id": "q1"})
+        )
+
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                result = await mcp_client.call_tool(
+                    "query",
+                    {
+                        "model": "ecommerce",
+                        "view": "orders",
+                        "fields": ["orders.region"],
+                        "result_format": result_format,
+                    },
+                    raise_on_error=False,
+                )
+        finally:
+            await looker_client.close()
+
+        assert result.is_error
+        assert not create_query.called

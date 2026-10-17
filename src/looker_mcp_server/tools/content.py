@@ -7,7 +7,8 @@ adding dashboard elements and filters, and generating embed URLs.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+import re
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 
@@ -18,6 +19,12 @@ from ._query_spec import (
     FillFields,
     FilterExpression,
     Pivots,
+    QueryExplore,
+    QueryFields,
+    QueryFilters,
+    QueryLimit,
+    QueryModel,
+    QuerySorts,
     QueryTimezone,
     RowTotal,
     Subtotals,
@@ -27,17 +34,45 @@ from ._query_spec import (
     create_query,
 )
 
+FolderFilter = Annotated[
+    str | None,
+    "Return only items in this folder, given as a folder ID, for example '7'. "
+    "Default: every folder.",
+]
+SearchLimit = Annotated[int, "Maximum results to return, for example 20. Default 50."]
+TitlePattern = Annotated[
+    str | None,
+    "Title to match, case-insensitive, with % as a wildcard: '%Revenue%' matches any "
+    "title that contains Revenue. Default: any title.",
+]
+
+
+def _filter_name_from_title(title: str) -> str:
+    """Derive a stable dashboard-filter ``name`` from its title.
+
+    Lowercase, every run of non-alphanumeric characters becomes ``_``, and
+    leading or trailing underscores are dropped: ``"Order Date (UTC)"``
+    becomes ``"order_date_utc"``. A title with no alphanumerics falls back
+    to ``"filter"``.
+    """
+    return re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "filter"
+
 
 def register_content_tools(server: FastMCP, client: LookerClient) -> None:
     # ── Looks ────────────────────────────────────────────────────────
 
     @server.tool(
-        description="Search for saved Looks by title, description, or other criteria.",
+        description=(
+            "Search saved Looks by title or folder and return each one's ID, title, "
+            "description, folder, model and view count. Use it to find a Look to run "
+            "with run_look. It does not return the Look's data and does not search "
+            "dashboards; use list_dashboards for those."
+        ),
     )
     async def list_looks(
-        title: Annotated[str | None, "Filter by title (partial match)"] = None,
-        folder_id: Annotated[str | None, "Filter by folder ID"] = None,
-        limit: Annotated[int, "Maximum results"] = 50,
+        title: TitlePattern = None,
+        folder_id: FolderFilter = None,
+        limit: SearchLimit = 50,
     ) -> str:
         ctx = client.build_context("list_looks", "content")
         try:
@@ -65,22 +100,24 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Create a new saved Look from a query definition. The query is "
-            "materialized first, then saved as a Look in the specified folder. "
-            "Supports pivots, visualization config, totals, and timezone — not "
-            "just flat tables."
+            "Save a query as a new Look in a folder and return the Look's ID, title, "
+            "URL and query ID. Use it when a person asks to keep a query as a saved "
+            "Look; it supports pivots, totals, visualization settings and a timezone as "
+            "well as flat tables. To get data without saving anything, use query."
         ),
     )
     async def create_look(
-        title: Annotated[str, "Title for the new Look"],
-        model: Annotated[str, "LookML model name"],
-        view: Annotated[str, "Explore/view name"],
-        fields: Annotated[list[str], "Fields to include in the query"],
-        folder_id: Annotated[str, "Folder ID to save the Look in"],
-        filters: Annotated[dict[str, str] | None, "Query filters"] = None,
-        sorts: Annotated[list[str] | None, "Sort expressions"] = None,
-        limit: Annotated[int, "Row limit for the query"] = 500,
-        description: Annotated[str | None, "Description of the Look"] = None,
+        title: Annotated[str, "Title for the new Look, for example 'Weekly revenue by region'."],
+        model: QueryModel,
+        view: QueryExplore,
+        fields: QueryFields,
+        folder_id: Annotated[str, "ID of the folder to save the Look in, for example '7'."],
+        filters: QueryFilters = None,
+        sorts: QuerySorts = None,
+        limit: QueryLimit = 500,
+        description: Annotated[
+            str | None, "Description shown with the Look. Default: none."
+        ] = None,
         pivots: Pivots = None,
         fill_fields: FillFields = None,
         filter_expression: FilterExpression = None,
@@ -141,12 +178,21 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("create_look", e)
 
-    @server.tool(description="Update a Look's metadata (title, description, folder).")
+    @server.tool(
+        description=(
+            "Change a saved Look's title, description or folder, and return its ID and "
+            "title. Use it to rename, describe or move a Look; arguments you leave out "
+            "stay as they are. It cannot change the Look's query; save a new Look with "
+            "create_look for that."
+        ),
+    )
     async def update_look(
-        look_id: Annotated[str, "ID of the Look to update"],
-        title: Annotated[str | None, "New title"] = None,
-        description: Annotated[str | None, "New description"] = None,
-        folder_id: Annotated[str | None, "Move to a different folder"] = None,
+        look_id: Annotated[str, "ID of the Look to update, for example '42'."],
+        title: Annotated[str | None, "New title. Default: unchanged."] = None,
+        description: Annotated[str | None, "New description. Default: unchanged."] = None,
+        folder_id: Annotated[
+            str | None, "ID of the folder to move the Look to, for example '7'. Default: unchanged."
+        ] = None,
     ) -> str:
         ctx = client.build_context("update_look", "content", {"look_id": look_id})
         try:
@@ -163,9 +209,15 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("update_look", e)
 
-    @server.tool(description="Delete a saved Look. This action cannot be undone.")
+    @server.tool(
+        description=(
+            "Delete a saved Look permanently. Use it only when a person has asked for "
+            "that Look to be removed, since the deletion cannot be undone. To rename or "
+            "move a Look instead, use update_look."
+        ),
+    )
     async def delete_look(
-        look_id: Annotated[str, "ID of the Look to delete"],
+        look_id: Annotated[str, "ID of the Look to delete, for example '42'."],
     ) -> str:
         ctx = client.build_context("delete_look", "content", {"look_id": look_id})
         try:
@@ -179,18 +231,16 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Search user-defined dashboards by title, description, or other "
-            "criteria. Does NOT return LookML dashboards (those defined in a "
-            "LookML project) — use list_lookml_dashboards for those."
+            "Search dashboards built in the Looker UI by title or folder and return each "
+            "one's ID, title, description, folder and view count. Use it to find a "
+            "dashboard to run with run_dashboard. It does not return LookML dashboards, "
+            "which are defined in a LookML project; use list_lookml_dashboards for those."
         ),
     )
     async def list_dashboards(
-        title: Annotated[
-            str | None,
-            "Filter by title — SQL LIKE pattern, so use '%Revenue%' for a partial match",
-        ] = None,
-        folder_id: Annotated[str | None, "Filter by folder ID"] = None,
-        limit: Annotated[int, "Maximum results"] = 50,
+        title: TitlePattern = None,
+        folder_id: FolderFilter = None,
+        limit: SearchLimit = 50,
     ) -> str:
         ctx = client.build_context("list_dashboards", "content")
         try:
@@ -217,22 +267,23 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Search LookML dashboards — those defined in a LookML project "
-            "rather than built in the UI. These are invisible to "
-            "list_dashboards and are addressed as 'model::slug' "
-            "(e.g. 'analytics::executive_overview'). Title filters use SQL "
-            "LIKE pattern matching, so use '%Revenue%' for partial matches. "
-            "Only returns LookML dashboards deployed to production — a "
-            "dashboard on an unmerged branch will not appear."
+            "Search LookML dashboards, the ones defined in a LookML project rather than "
+            "built in the UI, and return each one's ID, title, description and folder. "
+            "Use it when list_dashboards does not find a dashboard, since it never "
+            "returns these; their IDs look like 'model::slug', for example "
+            "'analytics::executive_overview'. Only dashboards deployed to production "
+            "appear, not ones on an unmerged branch."
         ),
     )
     async def list_lookml_dashboards(
         title: Annotated[
             str | None,
-            "Filter by title — SQL LIKE pattern, so use '%Revenue%' for a partial match",
+            "Dashboard name to match, case-insensitive, with % as a wildcard, for example "
+            "'%revenue%'. This matches the dashboard_name in the LookML code, not the "
+            "title shown to viewers. Default: any dashboard.",
         ] = None,
-        folder_id: Annotated[str | None, "Filter by folder ID"] = None,
-        limit: Annotated[int, "Maximum results"] = 50,
+        folder_id: FolderFilter = None,
+        limit: SearchLimit = 50,
     ) -> str:
         ctx = client.build_context("list_lookml_dashboards", "content")
         try:
@@ -262,12 +313,19 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
             return format_api_error("list_lookml_dashboards", e)
 
     @server.tool(
-        description="Create a new empty dashboard in the specified folder.",
+        description=(
+            "Create an empty dashboard in a folder and return its ID, title and URL. "
+            "Use it as the first step of building a dashboard, then add tiles with "
+            "add_dashboard_element and filters with add_dashboard_filter. It does not "
+            "copy an existing dashboard or add any content."
+        ),
     )
     async def create_dashboard(
-        title: Annotated[str, "Title for the new dashboard"],
-        folder_id: Annotated[str, "Folder ID to save the dashboard in"],
-        description: Annotated[str | None, "Description"] = None,
+        title: Annotated[str, "Title for the new dashboard, for example 'Sales overview'."],
+        folder_id: Annotated[str, "ID of the folder to create it in, for example '7'."],
+        description: Annotated[
+            str | None, "Description shown with the dashboard. Default: none."
+        ] = None,
     ) -> str:
         ctx = client.build_context("create_dashboard", "content")
         try:
@@ -287,12 +345,22 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("create_dashboard", e)
 
-    @server.tool(description="Update a dashboard's metadata (title, description, folder).")
+    @server.tool(
+        description=(
+            "Change a dashboard's title, description or folder, and return its ID and "
+            "title. Use it to rename, describe or move a dashboard; arguments you leave "
+            "out stay as they are. It does not change tiles or filters; use "
+            "add_dashboard_element and add_dashboard_filter for those."
+        ),
+    )
     async def update_dashboard(
-        dashboard_id: Annotated[str, "ID of the dashboard to update"],
-        title: Annotated[str | None, "New title"] = None,
-        description: Annotated[str | None, "New description"] = None,
-        folder_id: Annotated[str | None, "Move to a different folder"] = None,
+        dashboard_id: Annotated[str, "ID of the dashboard to update, for example '17'."],
+        title: Annotated[str | None, "New title. Default: unchanged."] = None,
+        description: Annotated[str | None, "New description. Default: unchanged."] = None,
+        folder_id: Annotated[
+            str | None,
+            "ID of the folder to move the dashboard to, for example '7'. Default: unchanged.",
+        ] = None,
     ) -> str:
         ctx = client.build_context("update_dashboard", "content", {"dashboard_id": dashboard_id})
         try:
@@ -309,9 +377,16 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("update_dashboard", e)
 
-    @server.tool(description="Delete a dashboard. This action cannot be undone.")
+    @server.tool(
+        description=(
+            "Delete a dashboard permanently, with its tiles and filters. Use it only "
+            "when a person has asked for that dashboard to be removed, since the "
+            "deletion cannot be undone. To rename or move a dashboard instead, use "
+            "update_dashboard."
+        ),
+    )
     async def delete_dashboard(
-        dashboard_id: Annotated[str, "ID of the dashboard to delete"],
+        dashboard_id: Annotated[str, "ID of the dashboard to delete, for example '17'."],
     ) -> str:
         ctx = client.build_context("delete_dashboard", "content", {"dashboard_id": dashboard_id})
         try:
@@ -325,18 +400,32 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Add a visualization tile to a dashboard. Requires a query "
-            "definition (model, view, fields) or a saved Look ID."
+            "Add a tile to a dashboard, showing either a saved Look or a new query, and "
+            "return the tile's ID and title. Use it after create_dashboard to fill a "
+            "dashboard. Give look_id for a saved Look, or query_model, query_view and "
+            "query_fields together for a new query; with neither, the tile has no query."
         ),
     )
     async def add_dashboard_element(
-        dashboard_id: Annotated[str, "ID of the dashboard"],
-        title: Annotated[str, "Title for the tile"],
-        type: Annotated[str, "Element type: 'vis' (visualization), 'text', 'filter'"] = "vis",
-        look_id: Annotated[str | None, "ID of a saved Look to embed"] = None,
-        query_model: Annotated[str | None, "LookML model for an inline query"] = None,
-        query_view: Annotated[str | None, "Explore/view for an inline query"] = None,
-        query_fields: Annotated[list[str] | None, "Fields for an inline query"] = None,
+        dashboard_id: Annotated[str, "ID of the dashboard, for example '17'."],
+        title: Annotated[str, "Title for the tile, for example 'Revenue by region'."],
+        type: Annotated[
+            str, "Tile type, for example 'vis' for a chart or table, or 'text'. Default 'vis'."
+        ] = "vis",
+        look_id: Annotated[
+            str | None, "ID of a saved Look to show, for example '42'. Default: none."
+        ] = None,
+        query_model: Annotated[
+            str | None, "LookML model for a new query, for example 'ecommerce'. Default: none."
+        ] = None,
+        query_view: Annotated[
+            str | None, "Explore name for a new query, for example 'orders'. Default: none."
+        ] = None,
+        query_fields: Annotated[
+            list[str] | None,
+            "Fully qualified fields for a new query, for example "
+            "['orders.region', 'orders.count']. Default: none.",
+        ] = None,
     ) -> str:
         ctx = client.build_context(
             "add_dashboard_element", "content", {"dashboard_id": dashboard_id}
@@ -357,9 +446,10 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
                         "fields": query_fields,
                     }
 
-                element = await session.post(
-                    f"/dashboards/{dashboard_id}/dashboard_elements", body=body
-                )
+                # Looker creates dashboard elements at ``POST /dashboard_elements``
+                # with the dashboard named in the body; the per-dashboard path
+                # only lists them.
+                element = await session.post("/dashboard_elements", body=body)
                 return json.dumps(
                     {"id": element.get("id"), "title": element.get("title")},
                     indent=2,
@@ -367,32 +457,89 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("add_dashboard_element", e)
 
-    @server.tool(description="Add a filter to a dashboard.")
+    @server.tool(
+        description=(
+            "Add a filter control to a dashboard and return the filter's ID, name and title. "
+            "Use it to let viewers narrow a dashboard: a 'field' filter, the default, "
+            "filters on one dimension and needs the dimension, model and explore, "
+            "while 'date', 'number' and 'string' filters need none of them. It does "
+            "not wire the filter to the dashboard's existing tiles."
+        ),
+    )
     async def add_dashboard_filter(
-        dashboard_id: Annotated[str, "ID of the dashboard"],
-        title: Annotated[str, "Filter display title"],
-        dimension: Annotated[str, "Fully-qualified dimension name (e.g. 'orders.region')"],
-        type: Annotated[str, "Filter type: 'field_filter', 'date_filter'"] = "field_filter",
-        default_value: Annotated[str | None, "Default filter value"] = None,
+        dashboard_id: Annotated[str, "ID of the dashboard, for example '17'."],
+        title: Annotated[str, "Title shown on the filter, for example 'Region'."],
+        dimension: Annotated[
+            str | None,
+            "Fully qualified dimension to filter on, for example 'orders.region'. "
+            "Required for a 'field' filter. Default: none.",
+        ] = None,
+        name: Annotated[
+            str | None,
+            "Filter name, which tiles use to listen to the filter, for example "
+            "'region'. Default: derived from title, lowercased with other characters "
+            "replaced by '_'.",
+        ] = None,
+        model: Annotated[
+            str | None,
+            "LookML model of the dimension, for example 'ecommerce'. Required for a "
+            "'field' filter. Default: none.",
+        ] = None,
+        explore: Annotated[
+            str | None,
+            "Explore of the dimension, for example 'orders'. Required for a 'field' "
+            "filter. Default: none.",
+        ] = None,
+        type: Annotated[
+            Literal["field", "date", "number", "string"],
+            "Filter type: 'field' (values of a dimension; the default), 'date', "
+            "'number' or 'string'.",
+        ] = "field",
+        default_value: Annotated[
+            str | None,
+            "Starting value as a Looker filter expression, for example '90 days' or "
+            "'West'. Default: no value.",
+        ] = None,
     ) -> str:
         ctx = client.build_context(
             "add_dashboard_filter", "content", {"dashboard_id": dashboard_id}
         )
         try:
+            if type == "field" and not (dimension and model and explore):
+                raise ValueError(
+                    "add_dashboard_filter: a 'field' filter requires dimension=…, "
+                    "model=… and explore=…, naming the dimension and where it comes "
+                    "from."
+                )
             async with client.session(ctx) as session:
+                filter_name = name or _filter_name_from_title(title)
                 body: dict[str, Any] = {
                     "dashboard_id": dashboard_id,
+                    "name": filter_name,
                     "title": title,
-                    "dimension": dimension,
                     "type": type,
                 }
+                if dimension:
+                    body["dimension"] = dimension
+                if model:
+                    body["model"] = model
+                if explore:
+                    body["explore"] = explore
                 if default_value:
                     body["default_value"] = default_value
 
-                filt = await session.post(
-                    f"/dashboards/{dashboard_id}/dashboard_filters", body=body
+                # Looker creates dashboard filters at ``POST /dashboard_filters``
+                # with the dashboard named in the body; the per-dashboard path
+                # only lists them.
+                filt = await session.post("/dashboard_filters", body=body)
+                return json.dumps(
+                    {
+                        "id": filt.get("id"),
+                        "name": filt.get("name") or filter_name,
+                        "title": filt.get("title"),
+                    },
+                    indent=2,
                 )
-                return json.dumps({"id": filt.get("id"), "title": filt.get("title")}, indent=2)
         except Exception as e:
             return format_api_error("add_dashboard_filter", e)
 
@@ -400,15 +547,22 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Generate an embeddable SSO URL for Looker content (dashboards, "
-            "Looks, or explores). The URL includes authentication so the "
-            "viewer does not need separate Looker credentials."
+            "Create an embed URL for Looker content, such as a dashboard, Look or "
+            "explore, that carries its own authentication, so the viewer needs no Looker "
+            "login. Use it when content has to appear inside another application. Treat "
+            "the URL as a credential and share it only with the intended viewer."
         ),
     )
     async def generate_embed_url(
-        target_url: Annotated[str, "Looker content URL path (e.g. '/dashboards/123')"],
-        session_length: Annotated[int, "Session duration in seconds"] = 3600,
-        force_logout_login: Annotated[bool, "Force new login session"] = False,
+        target_url: Annotated[str, "Path of the content to embed, for example '/dashboards/17'."],
+        session_length: Annotated[
+            int, "Length of the embed session in seconds, for example 600. Default 3600."
+        ] = 3600,
+        force_logout_login: Annotated[
+            bool,
+            "Set true to end the viewer's existing Looker session before logging in. "
+            "Default false.",
+        ] = False,
     ) -> str:
         ctx = client.build_context("generate_embed_url", "content")
         try:
@@ -425,11 +579,11 @@ def register_content_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Run Looker's content validator across all looks and dashboards "
-            "in the instance. Returns broken content references grouped by "
-            "error kind (e.g. missing explore, renamed field, deleted "
-            "model). Useful to audit breakage after a LookML change before "
-            "users see errors. Can be slow on large instances."
+            "Run Looker's content validator over every Look and dashboard and return "
+            "the broken references, counted by kind, such as a missing explore or a "
+            "renamed field. Use it after a LookML change to find content that will show "
+            "errors before users see them. It can take minutes on a large instance, and "
+            "the response lists every broken item, so it can be long."
         ),
     )
     async def validate_content() -> str:

@@ -25,39 +25,89 @@ from ..client import LookerSession
 # concepts identically. For an LLM caller the Annotated description IS
 # the interface, so wording drift is a real defect.
 
+QueryModel = Annotated[
+    str,
+    "LookML model name, for example 'ecommerce'. list_models returns the model names.",
+]
+QueryExplore = Annotated[
+    str,
+    "Name of the explore to query, for example 'orders'. Looker's API calls this "
+    "field 'view', but it takes the explore name that list_models or get_model returns.",
+]
+QueryFields = Annotated[
+    list[str],
+    "Fields to return, as fully qualified names from the explore, for example "
+    "['orders.region', 'orders.total_revenue']. Dimensions group the rows and "
+    "measures aggregate them.",
+]
+QueryFilters = Annotated[
+    dict[str, str] | None,
+    "Filters, as a map from a fully qualified field name to a Looker filter "
+    "expression, for example {'orders.created_date': '90 days'} (the last 90 days), "
+    "{'orders.amount': '>=100'}, {'orders.region': '-NULL'} (not null) or "
+    "{'orders.status': 'foo,bar'} (either value). A leading '-' negates a value, and "
+    "filters on different fields combine with AND. Default: no filters.",
+]
+QuerySorts = Annotated[
+    list[str] | None,
+    "Sort order as field names, each optionally followed by ' desc', for example "
+    "['orders.total_revenue desc']. Default: Looker's default order.",
+]
+QueryLimit = Annotated[int, "Maximum rows to return, for example 100. Default 500."]
+
 Pivots = Annotated[
     list[str] | None,
-    "Fields to pivot on — becomes the column axis (e.g. ['orders.status'])",
+    "Fields to pivot on, which become the column axis, for example ['orders.status']. "
+    "Default: no pivot.",
 ]
 FillFields = Annotated[
     list[str] | None,
-    "Dimensions to fill gaps in (e.g. ['orders.created_date']) so sparse "
-    "time series show empty periods instead of skipping them",
+    "Dimensions to fill gaps in, so a sparse time series shows empty periods instead "
+    "of skipping them, for example ['orders.created_date']. Default: no filling.",
 ]
 FilterExpression = Annotated[
     str | None,
-    "Looker filter expression. Required for OR conditions — the `filters` "
-    "argument structurally cannot express them "
-    "(e.g. '${orders.total} > 100 OR ${orders.status} = \"complete\"')",
+    "A Looker custom filter expression, needed for OR conditions, which `filters` "
+    "cannot express, for example '${orders.total} > 100 OR ${orders.status} = "
+    '"complete"\'. Default: none.',
 ]
-ColumnLimit = Annotated[int | None, "Maximum number of pivoted columns to return"]
-Total = Annotated[bool | None, "Include a column totals row"]
+ColumnLimit = Annotated[
+    int | None,
+    "Maximum number of pivoted columns to return, for example 20. Default: Looker's own limit.",
+]
+Total = Annotated[
+    bool | None,
+    "Set true to add a column-totals row, for example to total revenue across all "
+    "rows. Default: no totals row.",
+]
 RowTotal = Annotated[
     str | None,
-    "Row-total placement for pivoted queries — 'right' or 'left'. A string, not a boolean",
+    "Where to place row totals on a pivoted query, as a string rather than a boolean, "
+    "for example 'right'. Default: no row totals.",
 ]
-Subtotals = Annotated[list[str] | None, "Fields to compute subtotals on"]
+Subtotals = Annotated[
+    list[str] | None,
+    "Dimensions to compute subtotals on, for example ['orders.region']. Default: no subtotals.",
+]
 VisConfig = Annotated[
     dict[str, Any] | None,
-    "Visualization configuration. Opaque to Looker except the 'type' key, "
-    "which selects the visualization "
-    "(e.g. {'type': 'looker_grid'}, {'type': 'looker_line'}). Unknown keys "
-    "are ignored. Only meaningful on saved content — inert for raw data",
+    "Visualization settings for the saved content. The 'type' key selects the "
+    "visualization, for example {'type': 'looker_grid'} or {'type': 'looker_line'}; "
+    "other keys are visualization-specific properties that Looker recognizes for "
+    "that type, and unknown keys are ignored. It changes how saved content displays, "
+    "not the data. Default: Looker's default visualization.",
 ]
-QueryTimezone = Annotated[str | None, "Timezone to run the query in (e.g. 'America/Chicago')"]
+QueryTimezone = Annotated[
+    str | None,
+    "Timezone to run the query in, as an IANA name, for example 'America/Chicago'. "
+    "Default: Looker's configured timezone.",
+]
 DynamicFields = Annotated[
     str | None,
-    "JSON-encoded string defining table calculations and custom fields",
+    "Table calculations and custom fields, as a JSON-encoded string, for example "
+    '\'[{"category": "table_calculation", "table_calculation": "share", '
+    '"label": "Share", "expression": "${orders.count} / sum(${orders.count})"}]\'. '
+    "Default: none.",
 ]
 
 

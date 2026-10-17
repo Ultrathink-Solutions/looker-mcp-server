@@ -8,7 +8,7 @@ for all deployments.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 
@@ -18,8 +18,11 @@ from ..client import LookerClient, format_api_error
 def register_health_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
-            "Run a health check on the Looker instance. Returns status of "
-            "database connections, datagroups, and overall system health."
+            "Check the Looker instance's health and return counts of its database "
+            "connections, datagroups (with how many are stale or recently triggered) "
+            "and running queries. Use it to spot an instance-wide problem, such as stale "
+            "datagroups or a pile-up of running queries. It does not test whether each "
+            "connection works or look for broken content; use validate_content for that."
         ),
     )
     async def health_pulse() -> str:
@@ -65,14 +68,18 @@ def register_health_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Analyze usage patterns across Looker content. Shows which "
-            "models, explores, and content are most and least used."
+            "Summarize how the instance is used, either per model (its explores and "
+            "whether it has content) or per piece of content (the most viewed Looks and "
+            "dashboards). Use it to see which models or content matter most before a "
+            "cleanup or a change. The content summary reads only the first 100 Looks and "
+            "100 dashboards, so on a large instance it is a sample."
         ),
     )
     async def health_analyze(
         analysis_type: Annotated[
-            str,
-            "Type of analysis: 'models' (model/explore usage), 'content' (look/dashboard usage)",
+            Literal["models", "content"],
+            "What to summarize: 'models' (each model's explores; the default) or "
+            "'content' (the ten most viewed Looks and dashboards).",
         ] = "models",
     ) -> str:
         ctx = client.build_context("health_analyze", "health")
@@ -148,15 +155,18 @@ def register_health_tools(server: FastMCP, client: LookerClient) -> None:
 
     @server.tool(
         description=(
-            "Identify unused or orphaned LookML objects for cleanup. "
-            "Scans for explores with no content, unreferenced views, "
-            "and Looks/dashboards with zero views."
+            "Find candidates for cleanup: hidden explores and explores in models with no "
+            "content, or Looks and dashboards that have never been viewed. Use it when "
+            "tidying an instance, and review the candidates before deleting anything. "
+            "The content scan reads only the first 200 Looks and 200 dashboards, so on a "
+            "large instance it is partial."
         ),
     )
     async def health_vacuum(
         scope: Annotated[
-            str,
-            "What to scan: 'explores' (unused explores), 'content' (zero-view Looks/dashboards)",
+            Literal["explores", "content"],
+            "What to scan: 'explores' (hidden explores and those in models without "
+            "content; the default) or 'content' (Looks and dashboards with zero views).",
         ] = "explores",
     ) -> str:
         ctx = client.build_context("health_vacuum", "health")

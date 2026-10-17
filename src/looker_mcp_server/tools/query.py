@@ -7,25 +7,42 @@ saved Looks and dashboards, and searching across all content.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from collections.abc import Callable
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 
 from ..client import LookerClient, LookerSession, format_api_error
 from ._helpers import (
+    ACT_AS_USER_ARG,
+    DEV_ARGS,
     ActAsUser,
+    DevBranch,
+    DevMode,
+    DevProjectId,
     IncludeHidden,
     _filter_hidden,
     _maybe_use_branch,
     _validate_branch_args,
+    tool_with_hidden_args,
 )
-from ._query_spec import build_query_body, create_query
+from ._query_spec import (
+    QueryExplore,
+    QueryFields,
+    QueryFilters,
+    QueryLimit,
+    QueryModel,
+    QuerySorts,
+    build_query_body,
+    create_query,
+)
 
-# Looker returns these formats as ``text/plain`` rather than JSON; calling
-# ``session.get`` on them would raise ``Expecting value`` from the JSON
-# decoder. ``sql`` is the same trap that motivated #29 / ``get_text`` —
-# kept here so any future format additions stay co-located.
-_TEXT_PLAIN_FORMATS = frozenset({"csv", "txt", "sql"})
+# Looker returns these formats as text (``text/plain``, ``text/html`` or
+# ``text/markdown``) rather than JSON; calling ``session.get`` on them would
+# raise ``Expecting value`` from the JSON decoder. ``sql`` is the same trap
+# that motivated #29 / ``get_text`` — kept here so any future format
+# additions stay co-located.
+_TEXT_PLAIN_FORMATS = frozenset({"csv", "txt", "sql", "html", "md"})
 
 
 async def _run_path(
@@ -105,52 +122,64 @@ def _run_payload(result: Any, result_format: str = "json") -> dict[str, Any]:
     return {"data": result}
 
 
-def register_query_tools(server: FastMCP, client: LookerClient) -> None:
-    @server.tool(
+# Every Looker ``result_format`` that this path can return as JSON or text.
+# The binary formats (``xlsx``, ``png``, ``jpg``) are left out: the response
+# is decoded as JSON or text, so they never worked here, and the render group
+# covers images. ``json_fe`` is not in Looker's current reference but is still
+# accepted by Looker and was forwarded before this was an enum.
+ResultFormat = Annotated[
+    Literal["json", "json_bi", "json_detail", "json_fe", "csv", "txt", "html", "md", "sql"],
+    "Format of the result: 'json' (rows; the default), 'json_bi' (rows plus field, "
+    "pivot and table-calculation metadata), 'json_detail' (an older form of json_bi), "
+    "'json_fe', 'csv', 'txt', 'html', 'md', or 'sql' (the generated SQL instead of rows).",
+]
+
+
+def register_query_tools(
+    server: FastMCP,
+    client: LookerClient,
+    *,
+    dev_params: bool = False,
+    act_as_user: bool = False,
+) -> None:
+    """Register the query group.
+
+    ``dev_params`` offers the developer arguments (``DEV_ARGS``) and
+    ``act_as_user`` offers per-call sudo. Both default to off, and an argument
+    that is off is absent from the tool schemas (see ``tool_with_hidden_args``).
+    The server factory turns them on from the deployment's configuration.
+    """
+    hidden_args: set[str] = set()
+    if not dev_params:
+        hidden_args.update(DEV_ARGS)
+    if not act_as_user:
+        hidden_args.add(ACT_AS_USER_ARG)
+
+    def tool(description: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        return tool_with_hidden_args(server, description=description, hidden_args=hidden_args)
+
+    @tool(
         description=(
-            "Run a query using the Looker semantic model. Specify the model, "
-            "explore, fields, filters, and sorts. Looker generates the optimized "
-            "SQL — you never write SQL directly. Returns data rows as JSON."
+            "Run a query against a Looker explore and return its rows, a row count "
+            "and a link that opens the query in Looker. Use it to answer a question "
+            "with data: give the model, the explore (the `view` argument), fully "
+            "qualified field names and optional filters, and Looker writes and runs "
+            "the SQL. Look up field names with list_dimensions or list_measures first. "
+            "To see the SQL without running it use query_sql, and to run a saved Look "
+            "or dashboard use run_look or run_dashboard."
         ),
     )
     async def query(
-        model: Annotated[str, "LookML model name (e.g. 'ecommerce')"],
-        view: Annotated[str, "Explore/view name within the model (e.g. 'orders')"],
-        fields: Annotated[
-            list[str],
-            "Fields to select — use fully-qualified names "
-            "(e.g. ['orders.region', 'orders.total_revenue'])",
-        ],
-        filters: Annotated[
-            dict[str, str] | None,
-            "Filter expressions as field:value pairs (e.g. {'orders.created_date': '90 days'})",
-        ] = None,
-        sorts: Annotated[
-            list[str] | None,
-            "Sort expressions (e.g. ['orders.total_revenue desc'])",
-        ] = None,
-        limit: Annotated[int, "Maximum rows to return"] = 500,
-        result_format: Annotated[
-            str,
-            "Output format: 'json' (default), 'json_detail', 'csv', 'txt'",
-        ] = "json",
-        dev_mode: Annotated[
-            bool,
-            "Run against the dev workspace's currently-checked-out LookML "
-            "rather than production. Required when validating in-progress "
-            "branch edits. Implied automatically when ``branch`` is set.",
-        ] = False,
-        branch: Annotated[
-            str | None,
-            "Project branch to atomically swap to for this call. The dev "
-            "workspace's saved branch is restored when the call completes "
-            "(success or failure). Implies dev_mode=True; requires project_id.",
-        ] = None,
-        project_id: Annotated[
-            str | None,
-            "LookML project ID — required when ``branch`` is set so the "
-            "MCP knows which project's branch state to swap.",
-        ] = None,
+        model: QueryModel,
+        view: QueryExplore,
+        fields: QueryFields,
+        filters: QueryFilters = None,
+        sorts: QuerySorts = None,
+        limit: QueryLimit = 500,
+        result_format: ResultFormat = "json",
+        dev_mode: DevMode = False,
+        branch: DevBranch = None,
+        project_id: DevProjectId = None,
         act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
@@ -197,30 +226,25 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("query", e)
 
-    @server.tool(
+    @tool(
         description=(
-            "Generate the SQL that Looker would execute for a query, without "
-            "actually running it. Useful for reviewing or debugging queries."
+            "Return the SQL that Looker would run for a query, without running it. "
+            "Use it to check how Looker translates fields and filters into SQL, for "
+            "example when a result looks wrong. It takes the same arguments as query "
+            "and returns the SQL text with the query's Looker link, but no rows; use "
+            "query for the data."
         ),
     )
     async def query_sql(
-        model: Annotated[str, "LookML model name"],
-        view: Annotated[str, "Explore/view name"],
-        fields: Annotated[list[str], "Fields to select"],
-        filters: Annotated[dict[str, str] | None, "Filter expressions"] = None,
-        sorts: Annotated[list[str] | None, "Sort expressions"] = None,
-        limit: Annotated[int, "Maximum rows"] = 500,
-        dev_mode: Annotated[
-            bool,
-            "Compile the SQL against the dev workspace's LookML rather "
-            "than production. Implied when ``branch`` is set.",
-        ] = False,
-        branch: Annotated[
-            str | None,
-            "Project branch to atomically swap to for this call (saved "
-            "branch restored on exit). Requires project_id.",
-        ] = None,
-        project_id: Annotated[str | None, "LookML project ID — required with ``branch``"] = None,
+        model: QueryModel,
+        view: QueryExplore,
+        fields: QueryFields,
+        filters: QueryFilters = None,
+        sorts: QuerySorts = None,
+        limit: QueryLimit = 500,
+        dev_mode: DevMode = False,
+        branch: DevBranch = None,
+        project_id: DevProjectId = None,
         act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
@@ -263,30 +287,24 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("query_sql", e)
 
-    @server.tool(
+    @tool(
         description=(
-            "Run the query associated with a saved Look and return its results. "
-            "Looks are pre-built query configurations saved in Looker."
+            "Run a saved Look by its ID and return its rows with the Look's title and "
+            "links. Use it when a saved Look already answers the question; find Look "
+            "IDs with list_looks. The Look runs with its saved "
+            "fields and filters, so to change them build a new query with query "
+            "instead."
         ),
     )
     async def run_look(
-        look_id: Annotated[str, "ID of the saved Look"],
-        result_format: Annotated[str, "Output format: 'json', 'csv', 'txt'"] = "json",
-        limit: Annotated[int, "Maximum rows to return"] = 500,
-        dev_mode: Annotated[
-            bool,
-            "Resolve the Look's model+explore against the dev workspace's "
-            "LookML rather than production. Implied when ``branch`` is set.",
-        ] = False,
-        branch: Annotated[
-            str | None,
-            "Project branch to atomically swap to for this call (saved "
-            "branch restored on exit). Requires project_id.",
-        ] = None,
-        project_id: Annotated[
-            str | None,
-            "LookML project ID owning the Look's model — required with ``branch``",
-        ] = None,
+        look_id: Annotated[
+            str, "ID of the saved Look, for example '42'. list_looks returns Look IDs."
+        ],
+        result_format: ResultFormat = "json",
+        limit: QueryLimit = 500,
+        dev_mode: DevMode = False,
+        branch: DevBranch = None,
+        project_id: DevProjectId = None,
         act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
@@ -321,63 +339,45 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("run_look", e)
 
-    @server.tool(
+    @tool(
         description=(
-            "Run an existing saved Looker ``Query`` by ID and return its "
-            "results. Unlike ``query``, this does not re-spec the query "
-            "body — any settings baked into the saved ``Query`` (e.g. "
-            "``dynamic_fields`` / table calcs / vis config) are preserved. "
-            "Useful for re-running a query whose ID you already have: a "
-            "dashboard tile's ``query.id``, the id returned by "
-            "``query_url``, or an id surfaced by other Looker tooling."
+            "Run an existing Looker query by its ID and return its rows, keeping "
+            "everything saved with it, such as table calculations, custom fields and "
+            "visualization settings. Use it to re-run a query whose ID you already "
+            "have, for example a dashboard tile's query.id or the query_id that "
+            "query_url returns. To run a new or changed query use query, which takes "
+            "fields and filters instead of an ID."
         ),
     )
     async def run_query(
-        query_id: Annotated[str, "ID of the saved Query"],
-        result_format: Annotated[
-            str,
-            "Output format: 'json' (default), 'json_detail', 'csv', 'txt'",
-        ] = "json",
+        query_id: Annotated[str, "ID of the saved query, for example '1234'."],
+        result_format: ResultFormat = "json",
         limit: Annotated[
             int | None,
-            "Row limit override. Omit to use the limit baked into the saved Query.",
+            "Row limit for this run, for example 100. Default: the limit saved with the query.",
         ] = None,
         apply_formatting: Annotated[
             bool,
-            "Render values per LookML/Look formatting (currency symbols, "
-            "date formats, etc.). Default false matches Looker's API default.",
+            "Set true to return values formatted for display, such as currency "
+            "symbols and date formats. Default false.",
         ] = False,
         apply_vis: Annotated[
             bool,
-            "Apply visualization-config-driven rendering to the result. "
-            "Default false matches Looker's API default.",
+            "Set true to apply the query's saved visualization settings to the "
+            "values. Default false.",
         ] = False,
         server_table_calcs: Annotated[
             bool,
-            "Compute table calculations server-side so the response "
-            "includes them. Required for tile-fidelity validation when "
-            "the saved Query carries table calcs. Default false matches "
-            "Looker's API default.",
+            "Set true to compute the query's table calculations and include them "
+            "in the rows. Default false.",
         ] = False,
         cache: Annotated[
             bool,
-            "Allow Looker to serve cached results. Set false to force a "
-            "fresh run. Default true matches Looker's API default.",
+            "Set false to skip Looker's result cache and run against the database. Default true.",
         ] = True,
-        dev_mode: Annotated[
-            bool,
-            "Resolve the Query against the dev workspace's LookML rather "
-            "than production. Implied when ``branch`` is set.",
-        ] = False,
-        branch: Annotated[
-            str | None,
-            "Project branch to atomically swap to for this call (saved "
-            "branch restored on exit). Requires project_id.",
-        ] = None,
-        project_id: Annotated[
-            str | None,
-            "LookML project ID owning the Query's model — required with ``branch``",
-        ] = None,
+        dev_mode: DevMode = False,
+        branch: DevBranch = None,
+        project_id: DevProjectId = None,
         act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
@@ -416,14 +416,21 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("run_query", e)
 
-    @server.tool(
+    @tool(
         description=(
-            "Get a dashboard definition and run all its tile queries. "
-            "Returns the dashboard metadata and the data for each element."
+            "Run every tile on a dashboard and return the dashboard's details with "
+            "each tile's title, query and rows. Use it when the question is about a "
+            "whole dashboard; find dashboard IDs with list_dashboards. The response "
+            "carries every tile's data and can be "
+            "large, so for a single tile use run_query with that tile's query ID. A "
+            "tile whose query fails reports an error instead of rows."
         ),
     )
     async def run_dashboard(
-        dashboard_id: Annotated[str, "ID of the dashboard"],
+        dashboard_id: Annotated[
+            str,
+            "ID of the dashboard, for example '17'. list_dashboards returns dashboard IDs.",
+        ],
     ) -> str:
         ctx = client.build_context("run_dashboard", "query", {"dashboard_id": dashboard_id})
         try:
@@ -471,27 +478,23 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("run_dashboard", e)
 
-    @server.tool(
+    @tool(
         description=(
-            "Generate a URL to a Looker Explore with pre-populated query "
-            "parameters. The URL opens the Explore UI in Looker."
+            "Build a link that opens a query in Looker's Explore page, without "
+            "running it. Use it to hand a person a link where they can see or adjust "
+            "the query themselves. It returns the URL and the query's ID, not data; "
+            "use query for the rows."
         ),
     )
     async def query_url(
-        model: Annotated[str, "LookML model name"],
-        view: Annotated[str, "Explore/view name"],
-        fields: Annotated[list[str], "Fields to select"],
-        filters: Annotated[dict[str, str] | None, "Filter expressions"] = None,
-        sorts: Annotated[list[str] | None, "Sort expressions"] = None,
-        dev_mode: Annotated[
-            bool,
-            "Generate the URL against dev-workspace LookML. Implied when ``branch`` is set.",
-        ] = False,
-        branch: Annotated[
-            str | None,
-            "Project branch to atomically swap to for this call. Requires project_id.",
-        ] = None,
-        project_id: Annotated[str | None, "LookML project ID — required with ``branch``"] = None,
+        model: QueryModel,
+        view: QueryExplore,
+        fields: QueryFields,
+        filters: QueryFilters = None,
+        sorts: QuerySorts = None,
+        dev_mode: DevMode = False,
+        branch: DevBranch = None,
+        project_id: DevProjectId = None,
         act_as_user: ActAsUser = None,
     ) -> str:
         ctx = client.build_context(
@@ -528,20 +531,22 @@ def register_query_tools(server: FastMCP, client: LookerClient) -> None:
         except Exception as e:
             return format_api_error("query_url", e)
 
-    @server.tool(
+    @tool(
         description=(
-            "Search across all Looker content — dashboards, looks, explores, "
-            "and more. Returns matching items with titles, descriptions, and IDs. "
-            "Hidden items are excluded unless include_hidden=true."
+            "Search saved Looker content, such as dashboards, Looks and folders, by "
+            "text, and return the matching items with their IDs. Use it to find "
+            "existing content about a topic before running it with run_look or "
+            "run_dashboard. It matches content metadata, not the data inside the "
+            "content, and leaves out hidden items unless include_hidden is true."
         ),
     )
     async def search_content(
-        query_string: Annotated[str, "Search query (full-text search)"],
+        query_string: Annotated[str, "Text to search for, for example 'revenue'."],
         types: Annotated[
             list[str] | None,
-            "Content types to search: 'dashboard', 'look', 'folder', etc.",
+            "Content types to include, for example ['dashboard', 'look']. Default: all types.",
         ] = None,
-        limit: Annotated[int, "Maximum results to return"] = 20,
+        limit: Annotated[int, "Maximum results to return, for example 10. Default 20."] = 20,
         include_hidden: IncludeHidden = False,
     ) -> str:
         ctx = client.build_context("search_content", "query", {"query_string": query_string})

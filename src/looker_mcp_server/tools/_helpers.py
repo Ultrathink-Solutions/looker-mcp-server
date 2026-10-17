@@ -6,12 +6,18 @@ Anything that grows beyond one-liners should move to its own module.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Collection
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar
 from urllib.parse import quote
 
+from fastmcp import FastMCP
+from fastmcp.tools import Tool
+from fastmcp.tools.tool_transform import ArgTransform
+
 from ..client import LookerSession
+
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 
 def _set_if(body: dict[str, Any], key: str, value: Any) -> None:
@@ -43,23 +49,76 @@ def _path_seg(value: str | int) -> str:
 # notices this argument and rewrites the resolved identity to a sudo
 # session targeting ``act_as_user``.
 ACT_AS_USER_DESCRIPTION = (
-    "Optional Looker user ID or email to impersonate for this call. "
-    "Use to operate on another user's dev workspace (Looker dev mode is "
-    "per-user-isolated) or to run as a dedicated CI service user. Requires "
-    "sudo capability on the configured admin credentials. When omitted, the "
-    "call uses the configured or gateway-provided identity."
+    "Looker user to run this call as, given as a numeric user ID or an email "
+    "address, for example '42' or 'ci-bot@example.com'. Use it to work in "
+    "another user's dev workspace or to run as a dedicated service user. "
+    "Default: the current identity."
 )
 ActAsUser = Annotated[str | None, ACT_AS_USER_DESCRIPTION]
+ACT_AS_USER_ARG = "act_as_user"
+
+# The query tools' developer arguments: the dev-workspace switch and the
+# atomic branch swap (``project_id`` exists only to name the branch's
+# project). They are offered only when the deployment opts in with
+# ``LOOKER_QUERY_DEV_PARAMS``.
+DEV_ARGS = ("dev_mode", "branch", "project_id")
+DevMode = Annotated[
+    bool,
+    "Set true to use the LookML checked out in the dev workspace instead of "
+    "production, for example to test unmerged changes. Default false; setting "
+    "branch turns it on.",
+]
+DevBranch = Annotated[
+    str | None,
+    "Git branch to check out in the dev workspace for this call only, for example "
+    "'feature-x'. The workspace's previous branch is restored afterwards, even on "
+    "failure. Requires project_id and turns on dev_mode. Default: no branch change.",
+]
+DevProjectId = Annotated[
+    str | None,
+    "LookML project that owns branch, for example 'ecommerce'. Required when branch "
+    "is set. Default: none.",
+]
+
+
+def tool_with_hidden_args(
+    server: FastMCP,
+    *,
+    description: str,
+    hidden_args: Collection[str] = (),
+) -> Callable[[_F], _F]:
+    """Register a tool like ``@server.tool``, leaving ``hidden_args`` out of it.
+
+    Lets one function body serve every deployment shape: a tool whose
+    optional arguments only some deployments can use is defined once, with
+    all of them, and the arguments a deployment cannot use are removed from
+    the registered schema here. FastMCP's argument transform does the
+    removal, so a hidden argument is absent from ``tools/list`` and a call
+    that sends one anyway is rejected as an unexpected argument instead of
+    being silently ignored. The function body receives the parameter's
+    default. Every hidden argument must therefore have a default.
+
+    Names in ``hidden_args`` that the function does not take are ignored,
+    so callers can pass one shared set to tools with different signatures.
+    """
+
+    def decorator(fn: _F) -> _F:
+        tool: Tool = Tool.from_function(fn, description=description)
+        offered = tool.parameters.get("properties") or {}
+        transforms = {name: ArgTransform(hide=True) for name in hidden_args if name in offered}
+        if transforms:
+            tool = Tool.from_tool(tool, transform_args=transforms)
+        server.add_tool(tool)
+        return fn
+
+    return decorator
 
 
 # Per-call hidden-content toggle shared across discovery tools (explore,
 # query). LookML ``hidden: yes`` is a curation signal — model authors hide
 # fields and explores they don't want surfaced in the field picker — so
 # discovery tools honor it by default and expose this escape hatch.
-INCLUDE_HIDDEN_DESCRIPTION = (
-    "Include items marked hidden in LookML (hidden explores, fields, or "
-    "content). Hidden items are excluded by default."
-)
+INCLUDE_HIDDEN_DESCRIPTION = "Set true to also return items marked hidden in LookML. Default false."
 IncludeHidden = Annotated[bool, INCLUDE_HIDDEN_DESCRIPTION]
 
 

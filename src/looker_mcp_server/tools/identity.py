@@ -22,13 +22,10 @@ from ..client import LookerClient, format_api_error
 def register_identity_tools(server: FastMCP, client: LookerClient) -> None:
     @server.tool(
         description=(
-            "Return the Looker user this MCP session is currently authenticated "
-            "as. Calls ``GET /user``, which Looker resolves against the active "
-            "session token — so when the session is sudo-impersonating another "
-            "user (per-call ``act_as_user`` or ``X-User-Token`` header), the "
-            "impersonated user's record is returned. Useful when the same "
-            "Looker instance has multiple similarly-named users and you need "
-            "to confirm which one the MCP is operating as."
+            "Return the Looker user this session acts as: ID, display name, email, "
+            "role IDs and group IDs. Use it to confirm whose permissions and dev "
+            "workspace apply before running work that depends on the user. When the "
+            "session impersonates another user, it returns that user."
         ),
     )
     async def whoami() -> str:
