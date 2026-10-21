@@ -1,6 +1,6 @@
 [project]
 name = "looker-mcp-server"
-version = "0.24.1"
+version = "0.25.0"
 description = "A Model Context Protocol (MCP) server for the Looker API with full tool coverage, OAuth pass-through, and user impersonation support."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -18,9 +18,20 @@ classifiers = [
 ]
 readme = "README.md"
 dependencies = [
-    "fastmcp>=3.2.0,<4", # CVE-2026-32871 fix (SSRF in OpenAPI Provider)
+    # FastMCP 4 runs on MCP SDK 2 and serves both protocol eras. The floor is
+    # the latest FastMCP release that ships security fixes: 4.1.2 fixes
+    # GHSA-7xgj-8392-5q4r and GHSA-vqqp-x5qm-5qp4, and it carries the earlier
+    # 4.x fixes, among them GHSA-99xm-8q53-5c8p (4.1.0), which completes the
+    # CVE-2026-32871 OpenAPI provider fix the 3.x floor was set for.
+    "fastmcp>=4.1.2,<5",
+    # Imported directly: mcp.types (per-revision result schemas for
+    # /_introspect) and starlette (routes, middleware). Floors match FastMCP 4's.
+    "mcp>=2.2,<3",
+    "starlette>=1.0.1",
+    # The Looker API client, JWKS fetch and token introspection use httpx;
+    # none of these clients is handed to FastMCP or the MCP SDK (httpx2).
     "httpx>=0.28",
-    "pydantic>=2.10",
+    "pydantic>=2.12",
     "pydantic-settings>=2.7",
     "structlog>=24.0",
     # OIDC / OAuth 2.1 resource-server mode (LOOKER_MCP_MODE=public):

@@ -71,3 +71,11 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
+
+      # FastMCP 4 clients default to the 2026-07-28 protocol era, so the run
+      # above drives every tool over sessionless requests. Run the suite again
+      # with clients pinned to the 2025-11-25 initialize handshake.
+      - name: Run tests (handshake-era clients)
+        env:
+          LOOKER_MCP_TEST_CLIENT_MODE: legacy
+        run: uv run pytest tests/ -q --tb=short

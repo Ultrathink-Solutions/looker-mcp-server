@@ -25,6 +25,7 @@ uv run ruff format .       # format code
 uv run ruff check .        # lint
 uv run pyright             # type check
 uv run pytest tests/ -v    # run tests
+LOOKER_MCP_TEST_CLIENT_MODE=legacy uv run pytest tests/   # again, as 2025-11-25 clients
 ```
 
 ## Project Structure
@@ -98,7 +99,13 @@ chore: update fastmcp dependency to 2.15
 ## Testing
 
 - Tests live in `tests/` and use `pytest` with `pytest-asyncio`
-- HTTP mocking uses `respx` (not `responses` or `aioresponses`)
+- HTTP mocking uses `respx` (not `responses` or `aioresponses`). `respx`
+  mocks the Looker API client (`httpx`); the MCP client in tests talks to
+  the server through `httpx2`, which `respx` leaves alone
+- The server serves two MCP protocol eras. A plain `fastmcp.Client(mcp)`
+  negotiates 2026-07-28; CI also runs the suite with
+  `LOOKER_MCP_TEST_CLIENT_MODE=legacy` so every test covers the 2025-11-25
+  handshake too. Pin `mode=` in a test only when the era is what it tests
 - Test both success and error paths
 - Test auth modes: api_key, sudo, and oauth where relevant
 

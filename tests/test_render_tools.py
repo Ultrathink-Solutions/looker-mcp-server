@@ -116,7 +116,7 @@ class TestRenderQuery:
                 )
                 content = result.content[0]
                 assert isinstance(content, ImageContent)
-                assert content.mimeType == "image/png"
+                assert content.mime_type == "image/png"
                 assert base64.b64decode(content.data) == PNG_BYTES
         finally:
             await looker_client.close()
@@ -182,10 +182,10 @@ class TestRenderLook:
                 )
                 content = result.content[0]
                 assert isinstance(content, ImageContent)
-                # FastMCP's Image(format="jpg") emits the literal
-                # "image/jpg" MIME — not "image/jpeg" — so the format
-                # round-trips through the MCP envelope unchanged.
-                assert content.mimeType == "image/jpg"
+                # FastMCP's Image(format="jpg") maps the format to the
+                # registered "image/jpeg" MIME type, so clients that key on
+                # the IANA name recognise the render.
+                assert content.mime_type == "image/jpeg"
         finally:
             await looker_client.close()
 
@@ -353,7 +353,7 @@ class TestRenderDashboardTile:
                 )
                 content = result.content[0]
                 assert isinstance(content, ImageContent)
-                assert content.mimeType == "image/png"
+                assert content.mime_type == "image/png"
         finally:
             await looker_client.close()
 

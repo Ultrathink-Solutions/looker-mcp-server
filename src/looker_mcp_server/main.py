@@ -14,9 +14,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import signal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+from starlette.middleware import Middleware
 
 from .config import ALL_GROUPS, DEFAULT_GROUPS, LookerConfig, LookerMcpMode
 from .middleware import HeaderCaptureMiddleware
@@ -26,6 +27,9 @@ from .server import (
     create_server,
     parse_groups,
 )
+
+if TYPE_CHECKING:
+    from fastmcp.server.auth import StaticTokenVerifier
 
 logger = structlog.get_logger()
 
@@ -77,6 +81,45 @@ def cli() -> None:
     asyncio.run(run(config, groups))
 
 
+def build_server_auth(config: LookerConfig) -> StaticTokenVerifier | None:
+    """Return the FastMCP auth provider for ``config``, or ``None``.
+
+    ``LOOKER_MCP_AUTH_TOKEN`` installs FastMCP's static bearer verifier, which
+    checks the ``Authorization`` header on every HTTP request to ``/mcp``.
+    """
+    if not config.mcp_auth_token:
+        return None
+    from fastmcp.server.auth import StaticTokenVerifier
+
+    return StaticTokenVerifier(
+        tokens={config.mcp_auth_token: {"client_id": "mcp-client", "scopes": []}}
+    )
+
+
+def build_http_middleware(config: LookerConfig) -> list[Middleware]:
+    """Return the ASGI middleware chain for the streamable-http transport.
+
+    Composition order matters: the mode-specific auth gate (when present)
+    runs FIRST so unauthenticated requests are rejected before
+    :class:`HeaderCaptureMiddleware` copies anything into the request-scoped
+    ``ContextVar``. ``public`` mode validates a JWKS-backed JWT;
+    ``looker_oauth`` mode introspects an opaque Looker token via
+    ``GET /user``. At most one is non-None for a given config. In dev mode
+    both return None and the chain is just ``[HeaderCaptureMiddleware]``.
+
+    Every layer works on the HTTP request alone, never on MCP session state,
+    so it applies identically to a 2025-11-25 handshake-era request (which
+    belongs to a session opened by ``initialize``) and to a self-contained
+    2026-07-28 request (which has no ``initialize`` and no session).
+    """
+    middleware: list[Middleware] = []
+    auth_gate = build_public_mode_middleware(config) or build_looker_oauth_mode_middleware(config)
+    if auth_gate is not None:
+        middleware.append(auth_gate)
+    middleware.append(Middleware(HeaderCaptureMiddleware))
+    return middleware
+
+
 async def run(config: LookerConfig, groups: set[str]) -> None:
     """Start the server with graceful shutdown handling."""
     # ``public`` and ``looker_oauth`` are HTTP-only auth postures: their
@@ -95,15 +138,7 @@ async def run(config: LookerConfig, groups: set[str]) -> None:
         )
 
     # ── MCP-level auth (optional bearer token) ───────────────────────
-    auth: Any = None
-    if config.mcp_auth_token:
-        from fastmcp.server.auth import StaticTokenVerifier
-
-        auth = StaticTokenVerifier(
-            tokens={config.mcp_auth_token: {"client_id": "mcp-client", "scopes": []}}
-        )
-
-    mcp, client = create_server(config, enabled_groups=groups, auth=auth)
+    mcp, client = create_server(config, enabled_groups=groups, auth=build_server_auth(config))
 
     # ── Shutdown handling ────────────────────────────────────────────
     shutdown_event = asyncio.Event()
@@ -118,27 +153,10 @@ async def run(config: LookerConfig, groups: set[str]) -> None:
     # ── Transport kwargs ─────────────────────────────────────────────
     kwargs: dict[str, Any] = {}
     if config.is_http():
-        from starlette.middleware import Middleware
-
         kwargs["transport"] = "streamable-http"
         kwargs["host"] = config.host
         kwargs["port"] = config.port
-        # Composition order matters: the mode-specific auth gate (when
-        # present) runs FIRST so unauthenticated requests are rejected
-        # before HeaderCaptureMiddleware copies anything into the
-        # request-scoped ContextVar. ``public`` mode validates a JWKS-backed
-        # JWT; ``looker_oauth`` mode introspects an opaque Looker token via
-        # ``GET /user``. At most one is non-None for a given config. In dev
-        # mode both return None and the chain is just
-        # [HeaderCaptureMiddleware] as before.
-        middleware: list[Middleware] = []
-        auth_gate = build_public_mode_middleware(config) or build_looker_oauth_mode_middleware(
-            config
-        )
-        if auth_gate is not None:
-            middleware.append(auth_gate)
-        middleware.append(Middleware(HeaderCaptureMiddleware))
-        kwargs["middleware"] = middleware
+        kwargs["middleware"] = build_http_middleware(config)
     else:
         kwargs["transport"] = "stdio"
 

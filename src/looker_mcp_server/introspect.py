@@ -1,10 +1,20 @@
 """Unauthenticated tool-discovery endpoint at host-root ``/_introspect``.
 
 Mounts an MCP JSON-RPC handler at ``/_introspect`` that serves the
-**discovery slice** of the MCP protocol — ``initialize``,
-``notifications/initialized``, and ``tools/list`` — without requiring
-a user JWT. ``tools/call`` is deliberately rejected; execution must go
-through the authenticated ``/mcp`` route where token validation happens.
+**discovery slice** of the MCP protocol without requiring a user JWT, in
+both protocol eras:
+
+- Handshake era (2025-11-25 and earlier): ``initialize``,
+  ``notifications/initialized`` and ``tools/list``.
+- 2026-07-28 (no ``initialize``, no session): ``server/discover`` and
+  ``tools/list``, each request naming its protocol revision in the
+  ``MCP-Protocol-Version`` header and in ``params._meta``.
+
+``tools/call`` is deliberately rejected; execution must go through the
+authenticated ``/mcp`` route where token validation happens. FastMCP
+serves both eras on ``/mcp`` by itself; this route is hand-rolled
+JSON-RPC, so it shapes each reply for the era of the request through the
+MCP SDK's per-revision result schemas.
 
 Why a separate, unauthenticated route
 -------------------------------------
@@ -72,27 +82,49 @@ discovery cycle:
 - ``GET /_introspect``    → 204 No Content (no notifications stream).
 - ``DELETE /_introspect`` → 200 OK (no session state to release).
 
-Each ``POST /_introspect`` is logically standalone; ``Mcp-Session-Id``
-is echoed when supplied (per the MCP convention) or freshly minted.
+Each ``POST /_introspect`` is logically standalone. On a handshake-era
+request ``Mcp-Session-Id`` is echoed when supplied (per the MCP
+convention) or freshly minted; a 2026-07-28 request gets none, because
+that era has no sessions. Every notification is acknowledged with 202
+and dropped: JSON-RPC notifications get no reply, and none changes
+what discovery returns.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any, Final
 from uuid import uuid4
 
 import structlog
+from mcp.types import (
+    PROTOCOL_VERSION_META_KEY,
+    SERVER_INFO_META_KEY,
+    DiscoverResult,
+    ListToolsResult,
+    Result,
+    ServerCapabilities,
+    ToolsCapability,
+)
+from mcp.types.methods import serialize_server_result
+from mcp.types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 
 logger = structlog.get_logger()
 
 
-# The MCP protocol revision this discovery endpoint advertises. Held
-# as a module constant so the handshake reply and any future references
-# agree on a single value. This SHOULD track whatever revision the
-# authenticated ``/mcp`` handler negotiates so a client sees consistent
-# capability semantics regardless of which endpoint it speaks to.
+# The MCP protocol revision this discovery endpoint answers ``initialize``
+# with. Held as a module constant so the handshake reply and the shaping of
+# handshake-era results agree on a single value.
 MCP_PROTOCOL_VERSION: Final[str] = "2025-06-18"
+
+# The HTTP header a client names its protocol revision in. Starlette's
+# header mapping is case-insensitive.
+_PROTOCOL_VERSION_HEADER: Final[str] = "mcp-protocol-version"
+
+# Advertised by both ``initialize`` and ``server/discover``: the tool list
+# is fixed for the life of the process.
+_CAPABILITIES: Final = ServerCapabilities(tools=ToolsCapability(list_changed=False))
 
 
 # Environment variable name for the optional shared-bearer guard. Kept
@@ -107,6 +139,44 @@ def _jsonrpc_error(req_id: Any, code: int, message: str) -> dict[str, Any]:
 
 def _jsonrpc_result(req_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _request_protocol_version(headers: Mapping[str, str], body: dict[str, Any]) -> str:
+    """Return the protocol revision a discovery request is sent under.
+
+    A 2026-07-28 request names its revision in the ``MCP-Protocol-Version``
+    header and in ``params._meta``. A handshake-era request names it in the
+    header once the handshake is done, and ``initialize`` names it in
+    neither. Anything that does not name a modern revision is answered in
+    the handshake era.
+    """
+    header = headers.get(_PROTOCOL_VERSION_HEADER)
+    params = body.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    envelope = meta.get(PROTOCOL_VERSION_META_KEY) if isinstance(meta, dict) else None
+    for candidate in (header, envelope):
+        if isinstance(candidate, str) and candidate in MODERN_PROTOCOL_VERSIONS:
+            return candidate
+    if isinstance(header, str) and header in HANDSHAKE_PROTOCOL_VERSIONS:
+        return header
+    return MCP_PROTOCOL_VERSION
+
+
+def _shape_result(
+    method: str, version: str, result: Result, server_info: dict[str, str]
+) -> dict[str, Any]:
+    """Dump ``result`` as the wire JSON ``method`` returns in revision ``version``.
+
+    SDK models name their fields in snake_case, so the dump uses the wire
+    aliases (``inputSchema``, ``_meta``). The SDK's per-revision schema then
+    keeps exactly the fields that revision defines: ``resultType``, ``ttlMs``
+    and ``cacheScope`` appear only in a 2026-07-28 reply. A 2026-07-28 reply
+    also identifies the server in ``_meta``, as ``/mcp`` does.
+    """
+    dumped = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+    if version in MODERN_PROTOCOL_VERSIONS:
+        dumped["_meta"] = {**(dumped.get("_meta") or {}), SERVER_INFO_META_KEY: server_info}
+    return serialize_server_result(method, version, dumped)
 
 
 def _bearer_guard_passes(authorization_header: str | None, configured_token: str | None) -> bool:
@@ -144,7 +214,7 @@ def register_introspect_endpoint(
         A ``FastMCP`` server instance. Must expose the
         ``custom_route`` decorator, the async ``list_tools`` coroutine,
         and per-tool ``to_mcp_tool`` rendering — public surfaces on
-        FastMCP >=3.2.
+        FastMCP >=4.1.
     server_name:
         Identity returned in the ``initialize`` response's
         ``serverInfo.name`` field. Should match the FastMCP
@@ -196,38 +266,63 @@ def register_introspect_endpoint(
 
         method = body.get("method", "")
         req_id = body.get("id")
+        protocol_version = _request_protocol_version(request.headers, body)
+        modern = protocol_version in MODERN_PROTOCOL_VERSIONS
 
-        # ``Mcp-Session-Id`` is echoed when supplied (case-insensitive
-        # via Starlette's header dict) or freshly minted. The endpoint
-        # tracks no cross-request session state — each call is
-        # logically standalone, and a discovery loop opens a fresh
-        # "session" per registration cycle.
-        incoming_session = request.headers.get("mcp-session-id")
-        session_id = incoming_session or str(uuid4())
-        response_headers = {"mcp-session-id": session_id}
+        # On a handshake-era request ``Mcp-Session-Id`` is echoed when
+        # supplied (case-insensitive via Starlette's header dict) or freshly
+        # minted. The endpoint tracks no cross-request session state — each
+        # call is logically standalone, and a discovery loop opens a fresh
+        # "session" per registration cycle. The 2026-07-28 era has no
+        # sessions, so its replies carry no session id.
+        response_headers: dict[str, str] = {}
+        if not modern:
+            incoming_session = request.headers.get("mcp-session-id")
+            response_headers["mcp-session-id"] = incoming_session or str(uuid4())
+
+        if isinstance(method, str) and method.startswith("notifications/"):
+            # JSON-RPC notification — no response body. ``202`` mirrors
+            # what ``/mcp`` returns for a notification in either era, so a
+            # generic MCP client sees identical behavior across the two
+            # endpoints. Discovery acts on none of them (``initialized``
+            # included), so each is acknowledged and dropped rather than
+            # answered with an error the client has no request to match.
+            return Response(status_code=202, headers=response_headers)
 
         if method == "initialize":
             result = {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": server_info,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": _CAPABILITIES.model_dump(
+                    by_alias=True, mode="json", exclude_none=True
+                ),
             }
             return JSONResponse(
                 _jsonrpc_result(req_id, result),
                 headers=response_headers,
             )
 
-        if method == "notifications/initialized":
-            # JSON-RPC notification — no response body. ``202``
-            # mirrors what FastMCP returns for the same notification
-            # on ``/mcp`` so a generic MCP client sees identical
-            # behavior across the two endpoints.
-            return Response(status_code=202, headers=response_headers)
+        if method == "server/discover":
+            # The 2026-07-28 counterpart of ``initialize``: the revisions the
+            # endpoint speaks without a handshake, and its capabilities.
+            # Clients send it first when they auto-negotiate the era.
+            discover = DiscoverResult(
+                supported_versions=list(MODERN_PROTOCOL_VERSIONS),
+                capabilities=_CAPABILITIES,
+            )
+            version = protocol_version if modern else MODERN_PROTOCOL_VERSIONS[-1]
+            return JSONResponse(
+                _jsonrpc_result(
+                    req_id, _shape_result("server/discover", version, discover, server_info)
+                ),
+                headers=response_headers,
+            )
 
         if method == "tools/list":
             try:
                 tools = await mcp.list_tools()
-                tools_payload = [t.to_mcp_tool().model_dump(exclude_none=True) for t in tools]
+                listing = ListToolsResult(tools=[t.to_mcp_tool() for t in tools])
+                payload = _shape_result("tools/list", protocol_version, listing, server_info)
             except Exception:
                 logger.exception("introspect.tools_list_failed")
                 return JSONResponse(
@@ -236,7 +331,7 @@ def register_introspect_endpoint(
                     headers=response_headers,
                 )
             return JSONResponse(
-                _jsonrpc_result(req_id, {"tools": tools_payload}),
+                _jsonrpc_result(req_id, payload),
                 headers=response_headers,
             )
 
@@ -244,9 +339,11 @@ def register_introspect_endpoint(
         # ``prompts/*``, etc. — is rejected. Discovery is read-only;
         # execution must traverse the authenticated ``/mcp`` route
         # where the user JWT validates and per-tool scope is enforced.
+        # The 2026-07-28 HTTP binding maps method-not-found to 404; the
+        # handshake era keeps this endpoint's established 405.
         return JSONResponse(
             _jsonrpc_error(req_id, -32601, "Method not found"),
-            status_code=405,
+            status_code=404 if modern else 405,
             headers=response_headers,
         )
 

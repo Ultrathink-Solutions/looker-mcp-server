@@ -125,6 +125,121 @@ class TestIntrospectHandshake:
         # route calls and prompt model tool selection.
         assert tools["add"]["description"]
         assert "inputSchema" in tools["add"]
+        # MCP SDK 2 models name their fields in snake_case; the wire stays
+        # camelCase. A snake_case key here would break every client.
+        assert "input_schema" not in tools["add"]
+        assert "_meta" in tools["add"]
+        assert "meta" not in tools["add"]
+        # A handshake-era reply carries no 2026-07-28 result fields.
+        assert "resultType" not in body["result"]
+        assert "ttlMs" not in body["result"]
+
+
+def _modern_post(http: TestClient, method: str, request_id: int | None = 1) -> Any:
+    """POST a 2026-07-28 message: the version rides in the header and ``_meta``."""
+    body: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+        },
+    }
+    if request_id is not None:
+        body["id"] = request_id
+    return http.post(
+        "/_introspect",
+        json=body,
+        headers={"mcp-protocol-version": "2026-07-28", "mcp-method": method},
+    )
+
+
+class TestIntrospectProtocolEras:
+    """``/_introspect`` is hand-rolled JSON-RPC, so FastMCP's dual-era serving
+    does not cover it. It answers a 2026-07-28 gateway (``server/discover``,
+    then ``tools/list`` with no handshake) as well as a handshake-era one."""
+
+    def test_server_discover_advertises_the_modern_revision(self):
+        with TestClient(_http_app(_build_minimal_server())) as http:
+            resp = _modern_post(http, "server/discover")
+        assert resp.status_code == 200
+        result = resp.json()["result"]
+        assert result["supportedVersions"] == ["2026-07-28"]
+        assert result["capabilities"]["tools"] == {"listChanged": False}
+        assert result["resultType"] == "complete"
+        assert result["_meta"]["io.modelcontextprotocol/serverInfo"] == {
+            "name": "test-server",
+            "version": "9.9.9",
+        }
+        # The 2026-07-28 era has no sessions.
+        assert "mcp-session-id" not in resp.headers
+
+    def test_modern_tools_list_carries_the_2026_result_fields(self):
+        with TestClient(_http_app(_build_minimal_server())) as http:
+            resp = _modern_post(http, "tools/list")
+        assert resp.status_code == 200
+        result = resp.json()["result"]
+        assert result["resultType"] == "complete"
+        assert result["ttlMs"] == 0
+        assert result["cacheScope"] == "private"
+        assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "test-server"
+        tools = {t["name"]: t for t in result["tools"]}
+        assert {"add", "echo"} <= set(tools)
+        assert "inputSchema" in tools["add"]
+        assert "input_schema" not in tools["add"]
+        assert "mcp-session-id" not in resp.headers
+
+    def test_modern_tools_call_is_rejected_as_not_found(self):
+        """Execution stays on ``/mcp`` in the 2026-07-28 era too. That era's
+        HTTP binding maps method-not-found to 404, not this endpoint's
+        handshake-era 405."""
+        with TestClient(_http_app(_build_minimal_server())) as http:
+            resp = _modern_post(http, "tools/call")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == -32601
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "notifications/initialized",
+            "notifications/cancelled",
+            "notifications/progress",
+            "notifications/not_a_real_notification",
+        ],
+    )
+    @pytest.mark.parametrize("era", ["legacy", "2026-07-28"])
+    def test_any_notification_is_acknowledged_without_a_body(self, method: str, era: str):
+        """JSON-RPC notifications get no reply. A notification the endpoint
+        does not act on is acknowledged and dropped, never answered with an
+        error (the client has no request to attach one to)."""
+        with TestClient(_http_app(_build_minimal_server())) as http:
+            if era == "legacy":
+                resp = http.post("/_introspect", json={"jsonrpc": "2.0", "method": method})
+            else:
+                resp = _modern_post(http, method, request_id=None)
+        assert resp.status_code == 202
+        assert resp.content == b""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "negotiated"),
+        [("legacy", "2025-06-18"), ("auto", "2026-07-28"), ("2026-07-28", "2026-07-28")],
+    )
+    async def test_fastmcp_client_discovers_tools_in_each_era(self, mode: str, negotiated: str):
+        """A real MCP client lists the tools through ``/_introspect`` whichever
+        era it speaks: the handshake, ``server/discover`` auto-negotiation, or a
+        pinned 2026-07-28 connection that sends ``tools/list`` straight away."""
+        from tests._mcp_http import http_client, serving
+
+        app = _http_app(_build_minimal_server())
+        async with serving(app):
+            async with http_client(app, mode=mode, path="/_introspect") as client:
+                assert client.protocol_version == negotiated
+                tools = {tool.name: tool for tool in await client.list_tools()}
+        assert {"add", "echo"} <= set(tools)
+        assert tools["add"].input_schema["required"] == ["x", "y"]
 
 
 class TestIntrospectMethodGuard:

@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-21
+
+The server now runs on FastMCP 4 and the MCP Python SDK 2. It serves both MCP
+protocol eras on `/mcp`: 2025-11-25 clients, which open a session with
+`initialize`, and 2026-07-28 clients, which send self-contained requests with no
+handshake and no session. Every authentication mode checks the credential on
+each HTTP request and resolves the Looker identity from that request, so both
+eras are gated the same way. New tests prove this for each mode.
+
+### Changed
+
+- **Behaviour change: FastMCP 4 and MCP SDK 2 are required.** The dependency is
+  now `fastmcp>=4.1.2,<5` (was `>=3.2.0,<4`). 4.1.2 is the latest FastMCP
+  release that ships security fixes (GHSA-7xgj-8392-5q4r, GHSA-vqqp-x5qm-5qp4).
+  It also carries GHSA-99xm-8q53-5c8p (4.1.0), which completes the
+  CVE-2026-32871 OpenAPI provider fix that the 3.x floor was set for. The
+  package now declares the libraries it imports directly, at FastMCP 4's own
+  floors: `mcp>=2.2,<3` and `starlette>=1.0.1`. `pydantic` rises to `>=2.12`
+  (was `>=2.10`). An application that installs this package beside code pinned
+  to FastMCP 3, MCP SDK 1, Starlette 0.x or pydantic below 2.12 will no longer
+  resolve, and code that drives the server returned by `create_server` through
+  FastMCP 3 APIs must follow FastMCP's 3-to-4 upgrade guide. FastMCP and the
+  SDK now make HTTP calls with `httpx2`. The Looker API client, the JWKS fetch
+  and the `looker_oauth` token introspection still use `httpx`: none of them is
+  handed to FastMCP or the SDK.
+- **Both protocol eras on one endpoint.** Nothing needs configuring. A FastMCP 4
+  client in its default `mode="auto"` probes `server/discover` and speaks
+  2026-07-28 to this server. Older clients and `mode="legacy"` use the
+  handshake. `ping` and `logging/setLevel` exist only in the handshake era.
+- **Behaviour change: idle handshake-era sessions close after 30 minutes.** MCP
+  SDK 2 closes a streamable-HTTP session with no request in flight for 30
+  minutes; SDK 1 kept it until the client ended it. A request on a closed
+  session gets a 404, the protocol's signal to start a new session. Set
+  `FASTMCP_HTTP_SESSION_IDLE_TIMEOUT` to a number of seconds to change the
+  limit, or to `none` to turn it off. 2026-07-28 clients have no sessions.
+- **Behaviour change: JPEG renders are labelled `image/jpeg`.** `render_query`,
+  `render_look`, `render_dashboard` and `render_dashboard_tile` with
+  `result_format="jpg"` return image content typed `image/jpeg`, the registered
+  MIME type, instead of `image/jpg`. The bytes are unchanged.
+- **`tools/list` gives each tool a display `title`** derived from its name, for
+  example "Get Explore" for `get_explore`. FastMCP 4 adds it.
+- **`/_introspect` also answers 2026-07-28 gateways.** It serves
+  `server/discover`, and a `tools/list` sent without a handshake. Each reply is
+  shaped by the SDK's schema for the revision the request names: `resultType`,
+  `ttlMs`, `cacheScope` and the server identity in `_meta` appear only in
+  2026-07-28 replies, which also carry no `Mcp-Session-Id`. Every notification
+  is now acknowledged with an empty 202; any notification other than
+  `notifications/initialized` used to get a 405 and a JSON-RPC error. A
+  2026-07-28 request for another method, such as `tools/call`, gets a 404 with
+  `-32601`, as that era's HTTP binding requires; handshake-era requests still
+  get a 405.
+- **`main.build_server_auth` and `main.build_http_middleware`** return the auth
+  provider and the ASGI middleware chain `run()` installs, so an embedding
+  application or a test can build the same HTTP app.
+
+### Fixed
+
+- **`/_introspect` `tools/list` keeps the wire field names on MCP SDK 2.** SDK 2
+  models use snake_case attribute names, and the endpoint dumped them without
+  aliases, which would have sent `input_schema` instead of `inputSchema` and
+  broken any gateway's tool catalog. Each tool's `_meta` now also goes out as
+  `_meta`; under SDK 1 it went out as `meta`.
+
+### Added
+
+- **Tests for both protocol eras.** `tests/test_protocol_eras.py` drives the
+  production HTTP stack with a real MCP client in each era. For the
+  `looker_oauth`, `public` and static-bearer modes it checks that a missing,
+  rejected or revoked credential is refused, and that the Looker user a tool
+  runs as follows the credential on each request, including two requests in one
+  handshake-era session. It also checks that notifications, unknown methods and
+  malformed `tools/call` params pass through the auth gate and header capture
+  without breaking them. CI runs the whole suite a second time with
+  `LOOKER_MCP_TEST_CLIENT_MODE=legacy`, so every tool test runs in both eras.
+
 ## [0.24.1] - 2026-10-17
 
 ### Fixed
@@ -1315,7 +1390,8 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.1...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.1...v0.25.0
 [0.24.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.2...v0.24.0
 [0.23.2]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.1...v0.23.2

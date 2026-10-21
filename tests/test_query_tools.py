@@ -1104,7 +1104,7 @@ async def _input_properties(config: LookerConfig, **server_kwargs) -> dict[str, 
     try:
         async with Client(mcp) as mcp_client:
             tools = await mcp_client.list_tools()
-            return {t.name: set((t.inputSchema.get("properties") or {}).keys()) for t in tools}
+            return {t.name: set((t.input_schema.get("properties") or {}).keys()) for t in tools}
     finally:
         await looker_client.close()
 
