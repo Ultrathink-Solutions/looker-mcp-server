@@ -39,7 +39,7 @@ async def _tools(group: str) -> list:
 
 
 def _texts(tool) -> list[str]:
-    properties = tool.inputSchema.get("properties") or {}
+    properties = tool.input_schema.get("properties") or {}
     return [tool.description or ""] + [p.get("description") or "" for p in properties.values()]
 
 

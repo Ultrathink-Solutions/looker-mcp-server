@@ -15,6 +15,7 @@ A full-featured [Model Context Protocol](https://modelcontextprotocol.io) (MCP) 
 - **OAuth pass-through** — forward user tokens from an upstream gateway or MCP OAuth flow
 - **User impersonation** — admin sudo on self-hosted Looker, OAuth on Google Cloud core
 - **Dual transport** — stdio for local/CLI use, streamable-http for production deployment
+- **Both MCP protocol eras** — one endpoint serves 2025-11-25 clients (`initialize` handshake, `Mcp-Session-Id` sessions) and 2026-07-28 clients (no handshake, no session). Built on FastMCP 4 and the MCP Python SDK 2. See [Protocol Eras and HTTP Sessions](#protocol-eras-and-http-sessions)
 - **Selective tool loading** — enable only the tool groups you need via `--groups`
 - **Pluggable identity** — swap in custom authentication via the `IdentityProvider` protocol
 - **Health endpoints** — `/healthz` and `/readyz` for container orchestration
@@ -407,6 +408,8 @@ The `RequestContext` provides:
 
 MCP-level authentication (who can connect to the server) has three modes, selected by `LOOKER_MCP_MODE`.
 
+Every mode checks the credential on each HTTP request, not once per connection, so it applies the same way to both protocol eras. A 2026-07-28 client sends no `initialize` and opens no session. A 2025-11-25 session is not trusted on its own: each request in it must carry a valid credential, and the Looker identity a tool runs as comes from that request. A revoked token is refused on the caller's next request in either era.
+
 ### `LOOKER_MCP_MODE=dev` (default) — permissive
 
 Intended for local development, stdio deployments, and trust-network scenarios behind an upstream gateway. Two sub-options:
@@ -514,6 +517,15 @@ When you're ready to re-enable PDT builds after maintenance:
 
 These recipes are intentionally exposed as separate primitives rather than a single `disable_pdt_workflow(connection)` composite tool. Each call emits its own audit line in the `looker.session.sudo` debug log when run under `act_as_user`, which is the right granularity for compliance review. A composite tool would hide steps from the LLM-as-operator and make failure paths less legible.
 
+## Protocol Eras and HTTP Sessions
+
+The server runs on FastMCP 4 and the MCP Python SDK 2, and serves two protocol eras on the same `/mcp` endpoint. No configuration selects between them; each client's requests decide.
+
+- **2025-11-25 and earlier.** The client opens a session with `initialize` and sends `Mcp-Session-Id` on every later request. A session with no request in flight for 30 minutes (the MCP SDK default) is closed, and the client's next request on it gets a 404, the protocol's signal to start a new session. Set `FASTMCP_HTTP_SESSION_IDLE_TIMEOUT` to a number of seconds to change the limit, or to `none` to keep idle sessions open.
+- **2026-07-28.** There is no `initialize` and no session. Each POST carries its protocol version in the `MCP-Protocol-Version` header and in `params._meta`. Clients find the server's capabilities with `server/discover`. `ping` and `logging/setLevel` do not exist in this era.
+
+FastMCP 4 clients negotiate the era automatically: by default they try `server/discover` and fall back to `initialize`. The `/_introspect` discovery route also answers both eras.
+
 ## Health Endpoints
 
 When running in HTTP mode, the server exposes:
@@ -536,7 +548,8 @@ uv sync --locked --dev
 uv run ruff check .        # lint
 uv run ruff format .       # format
 uv run pyright             # type check
-uv run pytest tests/ -v    # tests
+uv run pytest tests/ -v    # tests (clients negotiate 2026-07-28)
+LOOKER_MCP_TEST_CLIENT_MODE=legacy uv run pytest tests/   # tests as 2025-11-25 clients
 ```
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for contribution guidelines.

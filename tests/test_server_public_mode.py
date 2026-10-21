@@ -112,18 +112,25 @@ class TestPrmRouteRegistration:
         neither need nor advertise it."""
         mcp, client = create_server(_dev_config())
         try:
-            async with Client(mcp) as mcp_client:
-                # FastMCP exposes registered custom routes via the internal
-                # app's route table. Easiest assertion: call the route via
-                # an HTTP transport and confirm 404. Here we inspect the
-                # underlying Starlette app.
-                app = mcp.http_app() if hasattr(mcp, "http_app") else None
-                if app is not None:
-                    route_paths = {getattr(r, "path", None) for r in getattr(app, "routes", [])}
-                    assert PRM_PATH not in route_paths, "dev mode must not register the PRM route"
-                # Regardless of transport-level probe, the client should be
-                # able to connect in stdio-equivalent in-process mode.
-                await mcp_client.ping()
+            # FastMCP exposes registered custom routes via the internal
+            # app's route table. Easiest assertion: call the route via
+            # an HTTP transport and confirm 404. Here we inspect the
+            # underlying Starlette app.
+            app = mcp.http_app() if hasattr(mcp, "http_app") else None
+            if app is not None:
+                route_paths = {getattr(r, "path", None) for r in getattr(app, "routes", [])}
+                assert PRM_PATH not in route_paths, "dev mode must not register the PRM route"
+            # Regardless of transport-level probe, the client should be able
+            # to connect in stdio-equivalent in-process mode, in both protocol
+            # eras. ``ping`` exists only in the handshake era (2025-11-25 and
+            # earlier); a 2026-07-28 connection has no initialize and no ping,
+            # so it proves liveness with ``server/discover`` instead.
+            async with Client(mcp, mode="legacy") as legacy_client:
+                await legacy_client.ping()
+            async with Client(mcp, mode="auto") as modern_client:
+                assert modern_client.protocol_version == "2026-07-28"
+                assert modern_client.server_info is not None
+                assert modern_client.server_info.name == "looker-mcp-server"
         finally:
             await client.close()
 

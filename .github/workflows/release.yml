@@ -28,6 +28,11 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -v
 
+      - name: Run tests (handshake-era clients)
+        env:
+          LOOKER_MCP_TEST_CLIENT_MODE: legacy
+        run: uv run pytest tests/ -q
+
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
