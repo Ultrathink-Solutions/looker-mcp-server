@@ -1,6 +1,6 @@
 [project]
 name = "looker-mcp-server"
-version = "0.25.0"
+version = "0.26.0"
 description = "A Model Context Protocol (MCP) server for the Looker API with full tool coverage, OAuth pass-through, and user impersonation support."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -34,6 +34,8 @@ dependencies = [
     "pydantic>=2.12",
     "pydantic-settings>=2.7",
     "structlog>=24.0",
+    # Imported directly: the query tool records dropped fields on the active span.
+    "opentelemetry-api>=1.39",
     # OIDC / OAuth 2.1 resource-server mode (LOOKER_MCP_MODE=public):
     # JWT decode + asymmetric key handling + JWKS fetching.
     "PyJWT[crypto]>=2.9",
@@ -55,6 +57,7 @@ dev = [
     "respx>=0.22",
     "ruff>=0.9",
     "pyright>=1.1.390",
+    "opentelemetry-sdk>=1.39",
 ]
 
 [build-system]

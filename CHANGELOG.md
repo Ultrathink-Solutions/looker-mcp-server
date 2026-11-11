@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-11
+
+### Changed
+
+- **Behaviour change: `query` refuses a result that is missing a requested
+  field.** When the explore lacks a field, or the person cannot see it, Looker
+  drops it and runs the rest, so the rows answer a different question and, when
+  the dropped field was a dimension, at a different grain. `query` now compares
+  the requested fields, ignoring case, with the columns that came back. If any
+  is missing it returns no rows and answers with `error`, `fields_dropped` and
+  `nearest_fields` (up to three close field names from the explore for each
+  dropped field), so a corrected retry takes one step. The check covers the
+  `json`, `json_bi` and `json_detail` formats. `run_query`, `run_look` and
+  `run_dashboard` are unchanged: they run saved queries whose fields can name
+  table calculations, and the caller cannot change them.
+
+### Added
+
+- **`fields_dropped` in the `query` result.** `[]` means every requested field
+  came back. `null` means the result cannot say: a result with no rows, a Looker
+  error row, or a format the check does not read (`csv`, `txt`, `html`, `md`,
+  `sql`, `json_fe`).
+- **Span attributes on `query`.** `looker.fields_dropped_count` and, when any
+  field was dropped, `looker.fields_dropped` are set on the active
+  OpenTelemetry span. `opentelemetry-api` is now a direct dependency (it was
+  already installed through FastMCP).
+
 ## [0.25.0] - 2026-10-21
 
 The server now runs on FastMCP 4 and the MCP Python SDK 2. It serves both MCP
@@ -1390,7 +1417,8 @@ infrastructure / deployment-posture release, not a tool surface expansion.
 - MCP-level bearer token authentication
 - ASGI header capture middleware for per-request identity
 
-[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.1...v0.25.0
 [0.24.1]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/ultrathink-solutions/looker-mcp-server/compare/v0.23.2...v0.24.0

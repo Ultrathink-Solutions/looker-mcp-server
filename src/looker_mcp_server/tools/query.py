@@ -6,11 +6,14 @@ saved Looks and dashboards, and searching across all content.
 
 from __future__ import annotations
 
+import difflib
 import json
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
+import structlog
 from fastmcp import FastMCP
+from opentelemetry import trace
 
 from ..client import LookerClient, LookerSession, format_api_error
 from ._helpers import (
@@ -121,6 +124,114 @@ def _run_payload(result: Any, result_format: str = "json") -> dict[str, Any]:
     return {"data": result}
 
 
+logger = structlog.get_logger()
+
+
+def _result_columns(result: Any, result_format: str) -> set[str] | None:
+    """Return the lower-cased column names a ``/run`` result carries.
+
+    ``None`` means the format cannot say which columns came back: no rows, a
+    Looker error row, text formats, or a shape this does not recognise.
+    """
+    names: set[str] = set()
+    if result_format == "json":
+        if not isinstance(result, list) or not result:
+            return None
+        for row in result:
+            if not isinstance(row, dict) or "looker_error" in row:
+                return None
+            names.update(str(key).lower() for key in row)
+        return names
+    if result_format == "json_bi":
+        metadata = result.get("metadata") if isinstance(result, dict) else None
+        groups = metadata.get("fields") if isinstance(metadata, dict) else None
+    elif result_format == "json_detail":
+        groups = result.get("fields") if isinstance(result, dict) else None
+    else:
+        return None
+    if not isinstance(groups, dict):
+        return None
+    for items in groups.values():
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.add(item["name"].lower())
+    return names or None
+
+
+def _fields_dropped(requested: list[str], result: Any, result_format: str) -> list[str] | None:
+    """Return the requested fields the result has no column for.
+
+    Names are stripped and de-duplicated on their lower-cased form (the first
+    spelling is kept, in request order); empty names are skipped; matching
+    ignores case. ``None`` means the result cannot say (see ``_result_columns``).
+    """
+    columns = _result_columns(result, result_format)
+    if columns is None:
+        return None
+    dropped: list[str] = []
+    seen: set[str] = set()
+    for name in (field.strip() for field in requested):
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        if key not in columns:
+            dropped.append(name)
+    return dropped
+
+
+async def _nearest_fields(
+    session: LookerSession, model: str, view: str, dropped: list[str]
+) -> dict[str, list[str]]:
+    """Suggest up to three explore field names close to each dropped field.
+
+    Reads the explore once. Any failure returns ``{}``: the refusal still names
+    the dropped fields, only the suggestions are lost.
+    """
+    try:
+        explore = await session.get(
+            f"/lookml_models/{_path_seg(model)}/explores/{_path_seg(view)}",
+            params={"fields": "fields"},
+        )
+        groups = explore["fields"]
+        names = [
+            item["name"]
+            for key in ("dimensions", "measures")
+            for item in groups.get(key) or []
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and not item.get("hidden")
+        ]
+        by_lower = {name.lower(): name for name in reversed(names)}
+        return {
+            field: [
+                by_lower[match]
+                for match in difflib.get_close_matches(
+                    field.lower(), list(by_lower), n=3, cutoff=0.6
+                )
+            ]
+            for field in dropped
+        }
+    except Exception as e:
+        logger.warning("looker.query.nearest_fields_failed", error_type=type(e).__name__)
+        return {}
+
+
+def _record_fields_dropped(dropped: list[str] | None) -> None:
+    """Record the dropped-field count and names on the active tool-call span.
+
+    ``None`` records nothing; the names are set only when there are some.
+    """
+    if dropped is None:
+        return
+    span = trace.get_current_span()
+    span.set_attribute("looker.fields_dropped_count", len(dropped))
+    if dropped:
+        span.set_attribute("looker.fields_dropped", dropped)
+
+
 # Every Looker ``result_format`` that this path can return as JSON or text.
 # The binary formats (``xlsx``, ``png``, ``jpg``) are left out: the response
 # is decoded as JSON or text, so they never worked here, and the render group
@@ -168,6 +279,9 @@ def register_query_tools(
             "with data: give the model, the explore (the `view` argument), fully "
             "qualified field names and optional filters, and Looker writes and runs "
             "the SQL. Look up field names with list_dimensions or list_measures first. "
+            "A query whose result lacks a requested field is refused, naming it in "
+            "`fields_dropped` with the closest names in `nearest_fields`; otherwise "
+            "`fields_dropped` is [], or null when the result cannot say. "
             "To see the SQL without running it use query_sql, and to run a saved Look "
             "or dashboard use run_look or run_dashboard."
         ),
@@ -219,11 +333,39 @@ def register_query_tools(
                         f"/queries/{query_id}/run/{result_format}",
                         result_format=result_format,
                     )
+                    dropped = _fields_dropped(fields, result, result_format)
+                    _record_fields_dropped(dropped)
+                    if dropped:
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"Looker returned no column for {', '.join(dropped)}: the "
+                                    "explore does not have "
+                                    + (
+                                        "this field, or the current user cannot see it"
+                                        if len(dropped) == 1
+                                        else "these fields, or the current user cannot see them"
+                                    )
+                                    + ", so the result would answer a different question. Check "
+                                    "the names with list_dimensions or list_measures "
+                                    "(nearest_fields lists the closest) and run the query again."
+                                ),
+                                "fields_dropped": dropped,
+                                "nearest_fields": await _nearest_fields(
+                                    session, model, view, dropped
+                                ),
+                            },
+                            indent=2,
+                        )
                     # ``query_def`` is the full Query object Looker returns from
                     # POST /queries — it carries share_url / expanded_share_url /
                     # url (the explore link). Surface it instead of dropping it.
                     return json.dumps(
-                        {"query": query_def, **_run_payload(result, result_format)},
+                        {
+                            "query": query_def,
+                            **_run_payload(result, result_format),
+                            "fields_dropped": dropped,
+                        },
                         indent=2,
                     )
         except Exception as e:

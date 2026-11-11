@@ -1527,3 +1527,278 @@ class TestResultFormats:
 
         assert result.is_error
         assert not create_query.called
+
+
+EXPLORE_URL = f"{API_URL}/lookml_models/ecommerce/explores/orders"
+
+
+async def _call_query(config: LookerConfig, fields: list[str], **extra: Any) -> dict[str, Any]:
+    """Run ``query`` on ecommerce/orders and return the decoded payload."""
+    mcp, looker_client = create_server(config, enabled_groups={"query"})
+    try:
+        async with Client(mcp) as mcp_client:
+            result = await mcp_client.call_tool(
+                "query",
+                {"model": "ecommerce", "view": "orders", "fields": fields, **extra},
+            )
+            content = result.content[0]
+            assert isinstance(content, TextContent)
+            return json.loads(content.text)
+    finally:
+        await looker_client.close()
+
+
+def _mock_query(run_format: str = "json", *, body: Any = None, text: str | None = None) -> None:
+    _mock_login_logout()
+    respx.post(f"{API_URL}/queries").mock(return_value=httpx.Response(201, json={"id": "q1"}))
+    response = (
+        httpx.Response(200, text=text, headers={"content-type": "text/plain"})
+        if text is not None
+        else httpx.Response(200, json=body)
+    )
+    respx.get(f"{API_URL}/queries/q1/run/{run_format}").mock(return_value=response)
+
+
+_DROPPING_FIELDS = ["orders.region", "orders.status", "orders.member_id"]
+_DROPPING_ROWS = [{"orders.region": "west", "orders.status": "open"}]
+_EXPLORE_FIELDS = {
+    "fields": {
+        "dimensions": [
+            {"name": "orders.region"},
+            {"name": "orders.status"},
+            {"name": "members.member_id"},
+        ],
+        "measures": [{"name": "orders.count"}],
+    }
+}
+
+
+class TestFieldsDropped:
+    """Looker drops a requested field the explore lacks (or the person cannot
+    see) and runs the rest. ``query`` refuses such a result instead of returning
+    rows that answer a different question."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_refuses_when_the_explore_drops_a_requested_field(self, config):
+        _mock_query(body=_DROPPING_ROWS)
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json=_EXPLORE_FIELDS))
+
+        payload = await _call_query(config, _DROPPING_FIELDS)
+
+        assert set(payload) == {"error", "fields_dropped", "nearest_fields"}
+        assert payload["fields_dropped"] == ["orders.member_id"]
+        assert payload["nearest_fields"]["orders.member_id"][0] == "members.member_id"
+        assert "orders.member_id" in payload["error"]
+        assert "data" not in payload
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_reports_no_dropped_fields_when_every_field_returns(self, config):
+        rows = [{"orders.region": "west"}]
+        _mock_query(body=rows)
+        explore = respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json={}))
+
+        payload = await _call_query(config, ["orders.region"])
+
+        assert explore.call_count == 0
+        assert payload["fields_dropped"] == []
+        assert payload["data"] == rows
+        assert payload["row_count"] == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_matches_field_names_ignoring_case(self, config):
+        _mock_query(body=[{"orders.region": "west"}])
+        explore = respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json={}))
+
+        payload = await _call_query(config, ["Orders.Region"])
+
+        assert explore.call_count == 0
+        assert payload["fields_dropped"] == []
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_csv_cannot_say_which_fields_were_dropped(self, config):
+        body = "orders.region\nwest\n"
+        _mock_query("csv", text=body)
+
+        payload = await _call_query(config, ["orders.region"], result_format="csv")
+
+        assert payload["fields_dropped"] is None
+        assert payload["data"] == body
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_with_no_rows_cannot_say_which_fields_were_dropped(self, config):
+        _mock_query(body=[])
+
+        payload = await _call_query(config, ["orders.region"])
+
+        assert payload["fields_dropped"] is None
+        assert payload["row_count"] == 0
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_passes_a_looker_error_row_through(self, config):
+        rows = [{"looker_error": "SQL compilation error"}]
+        _mock_query(body=rows)
+
+        payload = await _call_query(config, ["orders.region"])
+
+        assert payload["fields_dropped"] is None
+        assert payload["data"] == rows
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_json_detail_reads_its_columns_from_the_field_metadata(self, config):
+        _mock_query(
+            "json_detail",
+            body={
+                "fields": {"dimensions": [{"name": "orders.region"}], "measures": []},
+                "data": [],
+            },
+        )
+        respx.get(EXPLORE_URL).mock(
+            return_value=httpx.Response(200, json={"fields": {"dimensions": [], "measures": []}})
+        )
+
+        payload = await _call_query(
+            config, ["orders.region", "orders.count"], result_format="json_detail"
+        )
+
+        assert payload["fields_dropped"] == ["orders.count"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_refuses_without_suggestions_when_the_explore_cannot_be_read(self, config):
+        _mock_query(body=_DROPPING_ROWS)
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(404, json={"message": "Not found"}))
+
+        payload = await _call_query(config, _DROPPING_FIELDS)
+
+        assert payload["fields_dropped"] == ["orders.member_id"]
+        assert payload["nearest_fields"] == {}
+
+    def test_fields_dropped_is_recorded_on_the_active_span(self):
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        from looker_mcp_server.tools.query import _record_fields_dropped
+
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        tracer = provider.get_tracer("test")
+
+        def attributes_after(dropped: list[str] | None) -> dict[str, Any]:
+            exporter.clear()
+            with tracer.start_as_current_span("tools/call query"):
+                _record_fields_dropped(dropped)
+            (span,) = exporter.get_finished_spans()
+            return dict(span.attributes or {})
+
+        attrs = attributes_after(["orders.member_id"])
+        assert attrs["looker.fields_dropped_count"] == 1
+        assert tuple(attrs["looker.fields_dropped"]) == ("orders.member_id",)
+
+        attrs = attributes_after([])
+        assert attrs["looker.fields_dropped_count"] == 0
+        assert "looker.fields_dropped" not in attrs
+
+        attrs = attributes_after(None)
+        assert "looker.fields_dropped_count" not in attrs
+        assert "looker.fields_dropped" not in attrs
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_json_bi_reads_its_columns_from_the_field_metadata(self, config):
+        _mock_query(
+            "json_bi",
+            body={
+                "metadata": {"fields": {"dimensions": [{"name": "orders.region"}], "measures": []}},
+                "rows": [{"orders.region": "west"}],
+            },
+        )
+        respx.get(EXPLORE_URL).mock(
+            return_value=httpx.Response(200, json={"fields": {"dimensions": [], "measures": []}})
+        )
+
+        payload = await _call_query(
+            config, ["orders.region", "orders.count"], result_format="json_bi"
+        )
+
+        assert payload["fields_dropped"] == ["orders.count"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_with_empty_field_metadata_cannot_say_which_fields_were_dropped(
+        self, config
+    ):
+        _mock_query("json_detail", body={"fields": {}, "data": [{"orders.region": "west"}]})
+
+        payload = await _call_query(config, ["orders.region"], result_format="json_detail")
+
+        assert payload["fields_dropped"] is None
+        assert payload["data"]["data"] == [{"orders.region": "west"}]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_ignores_duplicate_and_empty_field_names(self, config):
+        _mock_query(body=[{"orders.region": "w"}])
+        explore = respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json={}))
+
+        payload = await _call_query(config, ["orders.region", "Orders.Region ", ""])
+
+        assert explore.call_count == 0
+        assert payload["fields_dropped"] == []
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_does_not_suggest_a_hidden_field(self, config):
+        _mock_query(body=_DROPPING_ROWS)
+        explore = {
+            "fields": {
+                "dimensions": [
+                    {"name": "members.member_id", "hidden": True},
+                    {"name": "members.member_ids"},
+                ],
+                "measures": [],
+            }
+        }
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json=explore))
+
+        payload = await _call_query(config, _DROPPING_FIELDS)
+
+        assert payload["nearest_fields"]["orders.member_id"] == ["members.member_ids"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_query_records_the_dropped_fields_it_found(self, config, monkeypatch):
+        from looker_mcp_server.tools import query as query_module
+
+        recorded: list[Any] = []
+        monkeypatch.setattr(query_module, "_record_fields_dropped", recorded.append)
+        _mock_query(body=_DROPPING_ROWS)
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json=_EXPLORE_FIELDS))
+        await _call_query(config, _DROPPING_FIELDS)
+        assert recorded == [["orders.member_id"]]
+
+        respx.reset()
+        recorded.clear()
+        _mock_query(body=[{"orders.region": "west"}])
+        await _call_query(config, ["orders.region"])
+        assert recorded == [[]]
+
+    @pytest.mark.asyncio
+    async def test_the_query_description_stays_under_the_tool_description_limit(self, config):
+        mcp, looker_client = create_server(config, enabled_groups={"query"})
+        try:
+            async with Client(mcp) as mcp_client:
+                tools = await mcp_client.list_tools()
+        finally:
+            await looker_client.close()
+        text = next(t.description or "" for t in tools if t.name == "query")
+        assert "fields_dropped" in text
+        assert len(text) < 2048
