@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-11-12
+
+### Fixed
+
+- **`query`'s refusal names the closest fields in its `error` text.** When a
+  result is missing a requested field, the `error` text now lists, for each
+  dropped field, the close field names from the explore, because some MCP
+  clients pass on only the `error` string and drop `fields_dropped` and
+  `nearest_fields`. A dropped field with no close name is left out of that
+  list, and when the explore cannot be read the text makes no claim of
+  suggestions and still points to `list_dimensions` or `list_measures`. The
+  `fields_dropped` and `nearest_fields` keys are unchanged.
+
 ## [0.26.0] - 2026-11-11
 
 ### Changed

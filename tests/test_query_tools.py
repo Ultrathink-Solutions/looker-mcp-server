@@ -1680,6 +1680,58 @@ class TestFieldsDropped:
         assert payload["fields_dropped"] == ["orders.member_id"]
         assert payload["nearest_fields"] == {}
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_refusal_text_names_the_closest_fields(self, config):
+        _mock_query(body=_DROPPING_ROWS)
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json=_EXPLORE_FIELDS))
+
+        payload = await _call_query(config, _DROPPING_FIELDS)
+
+        assert set(payload) == {"error", "fields_dropped", "nearest_fields"}
+        assert payload["fields_dropped"] == ["orders.member_id"]
+        assert payload["nearest_fields"]["orders.member_id"][0] == "members.member_id"
+        assert "orders.member_id" in payload["error"]
+        for name in payload["nearest_fields"]["orders.member_id"]:
+            assert name in payload["error"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_refusal_text_claims_no_closest_fields_when_the_lookup_fails(self, config):
+        _mock_query(body=_DROPPING_ROWS)
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(404, json={"message": "Not found"}))
+
+        payload = await _call_query(config, _DROPPING_FIELDS)
+
+        error = payload["error"]
+        assert payload["nearest_fields"] == {}
+        assert "orders.member_id" in error
+        assert "members.member_id" not in error
+        assert "nearest_fields" not in error
+        assert "list_dimensions" in error
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_refusal_text_names_closest_only_for_fields_that_have_some(self, config):
+        _mock_query(body=_DROPPING_ROWS)
+        explore = {
+            "fields": {
+                "dimensions": [*_EXPLORE_FIELDS["fields"]["dimensions"]],
+                "measures": [{"name": "orders.count"}],
+            }
+        }
+        respx.get(EXPLORE_URL).mock(return_value=httpx.Response(200, json=explore))
+
+        payload = await _call_query(config, [*_DROPPING_FIELDS, "orders.zzzqq"])
+
+        error = payload["error"]
+        assert payload["fields_dropped"] == ["orders.member_id", "orders.zzzqq"]
+        assert payload["nearest_fields"]["orders.zzzqq"] == []
+        assert "members.member_id" in error
+        assert error.count("orders.zzzqq") == 1  # in the dropped list, not among suggestions
+        assert "orders.count" not in error
+        assert "list_dimensions" in error
+
     def test_fields_dropped_is_recorded_on_the_active_span(self):
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
