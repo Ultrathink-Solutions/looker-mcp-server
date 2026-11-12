@@ -219,6 +219,30 @@ async def _nearest_fields(
         return {}
 
 
+def _dropped_fields_error(dropped: list[str], nearest: dict[str, list[str]]) -> str:
+    """The refusal text for a result that lacks requested fields.
+
+    Names the closest explore fields for each dropped field that has some, so a
+    client that keeps only this text still gets them. A dropped field with none,
+    or a failed lookup (``nearest`` empty), adds no claim of suggestions.
+    """
+    plural = len(dropped) > 1
+    text = (
+        f"Looker returned no column for {', '.join(dropped)}: the explore does not have "
+        + (
+            "these fields, or the current user cannot see them"
+            if plural
+            else "this field, or the current user cannot see it"
+        )
+        + ", so the result would answer a different question. Check the names with "
+        "list_dimensions or list_measures"
+    )
+    closest = [f"{field} -> {', '.join(nearest[field])}" for field in dropped if nearest.get(field)]
+    if closest:
+        text += f" (closest: {'; '.join(closest)})"
+    return text + " and run the query again."
+
+
 def _record_fields_dropped(dropped: list[str] | None) -> None:
     """Record the dropped-field count and names on the active tool-call span.
 
@@ -280,8 +304,9 @@ def register_query_tools(
             "qualified field names and optional filters, and Looker writes and runs "
             "the SQL. Look up field names with list_dimensions or list_measures first. "
             "A query whose result lacks a requested field is refused, naming it in "
-            "`fields_dropped` with the closest names in `nearest_fields`; otherwise "
-            "`fields_dropped` is [], or null when the result cannot say. "
+            "`fields_dropped` with the closest names in `nearest_fields` and in the "
+            "error text; otherwise `fields_dropped` is [], or null when the result "
+            "cannot say. "
             "To see the SQL without running it use query_sql, and to run a saved Look "
             "or dashboard use run_look or run_dashboard."
         ),
@@ -336,24 +361,12 @@ def register_query_tools(
                     dropped = _fields_dropped(fields, result, result_format)
                     _record_fields_dropped(dropped)
                     if dropped:
+                        nearest = await _nearest_fields(session, model, view, dropped)
                         return json.dumps(
                             {
-                                "error": (
-                                    f"Looker returned no column for {', '.join(dropped)}: the "
-                                    "explore does not have "
-                                    + (
-                                        "this field, or the current user cannot see it"
-                                        if len(dropped) == 1
-                                        else "these fields, or the current user cannot see them"
-                                    )
-                                    + ", so the result would answer a different question. Check "
-                                    "the names with list_dimensions or list_measures "
-                                    "(nearest_fields lists the closest) and run the query again."
-                                ),
+                                "error": _dropped_fields_error(dropped, nearest),
                                 "fields_dropped": dropped,
-                                "nearest_fields": await _nearest_fields(
-                                    session, model, view, dropped
-                                ),
+                                "nearest_fields": nearest,
                             },
                             indent=2,
                         )
